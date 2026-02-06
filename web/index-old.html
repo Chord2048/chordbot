@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chord Code</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">CC</div>
+        <div class="name">Chord Code</div>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="controls">
+        <input id="worktree" class="input" placeholder="Session worktree (absolute path)" />
+        <button id="create" class="btn">Create Session</button>
+        <button id="connect" class="btn secondary" disabled>Connect SSE</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel chat-panel">
+        <div class="panel-header">
+          <div class="panel-title">Chat</div>
+          <div class="panel-actions">
+            <label class="toggle">
+              <input id="autorun" type="checkbox" checked />
+              <span>Auto-run</span>
+            </label>
+            <button id="run" class="btn secondary" disabled>Run</button>
+            <button id="interrupt" class="btn danger" disabled>Interrupt</button>
+          </div>
+        </div>
+        <div id="chat" class="chat"></div>
+        <div class="composer">
+          <textarea id="input" class="textarea" placeholder="Type a message…" rows="3"></textarea>
+          <div class="composer-actions">
+            <button id="send" class="btn" disabled>Send</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel todo-panel">
+        <div class="panel-header">
+          <div class="panel-title">Todos</div>
+          <div class="panel-actions">
+            <button id="refreshTodos" class="btn secondary" disabled>Refresh</button>
+          </div>
+        </div>
+        <div id="todos" class="todos"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">Permissions</div>
+          <div class="panel-actions">
+            <button id="refreshPerm" class="btn secondary" disabled>Refresh</button>
+          </div>
+        </div>
+        <div id="perms" class="perms"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">Events (Raw)</div>
+          <div class="panel-actions">
+            <button id="clear" class="btn secondary">Clear</button>
+          </div>
+        </div>
+        <pre id="events" class="events"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

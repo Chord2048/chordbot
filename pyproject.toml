@@ -1,0 +1,32 @@
+[project]
+name = "chord-code"
+version = "0.1.0"
+description = "Python agent core inspired by Open Code"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "pydantic>=2.6",
+  "aiosqlite>=0.20",
+  "openai>=1.40",
+  "loguru>=0.7",
+  "tree-sitter>=0.21",
+  "tree-sitter-bash>=0.21",
+  "python-dotenv>=1.0",
+  "langfuse>=3.0",
+]
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,0 +1,267 @@
+/* Tool Card */
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  margin: 8px 0;
+  transition: all var(--transition-fast);
+}
+
+.tool-card.pending {
+  border-left: 3px solid var(--tool-pending);
+}
+
+.tool-card.running {
+  border-left: 3px solid var(--tool-running);
+  background: rgba(91, 156, 255, 0.04);
+}
+
+.tool-card.completed {
+  border-left: 3px solid var(--tool-completed);
+}
+
+.tool-card.error {
+  border-left: 3px solid var(--tool-error);
+  background: rgba(255, 91, 110, 0.04);
+}
+
+/* Tool Card Header */
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-card-header:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.tool-card-icon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.tool-card.pending .tool-card-icon { color: var(--tool-pending); }
+.tool-card.running .tool-card-icon { color: var(--tool-running); }
+.tool-card.completed .tool-card-icon { color: var(--tool-completed); }
+.tool-card.error .tool-card-icon { color: var(--tool-error); }
+
+.tool-card-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.tool-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tool-card-time {
+  font-family: var(--font-mono);
+}
+
+.tool-card-chevron {
+  transition: transform var(--transition-fast);
+  color: var(--muted);
+}
+
+.tool-card-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+/* Tool Card Body */
+.tool-card-body {
+  overflow: hidden;
+  transition: max-height var(--transition-normal);
+}
+
+.tool-card-body.collapsed {
+  max-height: 0;
+}
+
+/* Tool Section */
+.tool-section {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tool-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.tool-section-content {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.tool-section-content.input {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+}
+
+.tool-section-content.output {
+  background: rgba(54, 211, 153, 0.05);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(54, 211, 153, 0.15);
+}
+
+.tool-section-content.error {
+  background: rgba(255, 91, 110, 0.08);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 91, 110, 0.2);
+  color: var(--danger);
+}
+
+/* Running Animation */
+.tool-card.running .tool-card-icon {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* Permission Card (inline in chat) */
+.permission-card {
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-lg);
+  background: var(--warning-light);
+  margin: 12px 0;
+  overflow: hidden;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.permission-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: rgba(245, 166, 35, 0.08);
+  border-bottom: 1px solid rgba(245, 166, 35, 0.2);
+}
+
+.permission-card-icon {
+  font-size: 18px;
+}
+
+.permission-card-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.permission-card-body {
+  padding: 14px;
+}
+
+.permission-card-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.permission-card-content {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.permission-card-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+.permission-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.permission-card-actions .btn {
+  flex: 1;
+}
+
+/* Reasoning Part (thinking) */
+.reasoning-part {
+  margin: 8px 0;
+  border: 1px solid rgba(159, 176, 192, 0.2);
+  border-radius: var(--radius-md);
+  background: rgba(159, 176, 192, 0.04);
+}
+
+.reasoning-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.reasoning-header:hover {
+  background: rgba(159, 176, 192, 0.06);
+}
+
+.reasoning-icon {
+  color: var(--muted);
+}
+
+.reasoning-title {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.reasoning-chevron {
+  color: var(--muted);
+  transition: transform var(--transition-fast);
+}
+
+.reasoning-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.reasoning-content {
+  padding: 10px 12px;
+  border-top: 1px solid rgba(159, 176, 192, 0.15);
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.reasoning-content.collapsed {
+  display: none;
+}
