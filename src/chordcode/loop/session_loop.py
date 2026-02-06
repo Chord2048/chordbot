@@ -276,7 +276,7 @@ class SessionLoop:
                     if isinstance(raw, list):
                         msgs = cast(list[dict[str, Any]], raw)
 
-                params: dict[str, object] = {"temperature": 0.2, "top_p": 1.0, "top_k": 0, "options": {}}
+                params: dict[str, object] = {"temperature": 1.0, "top_p": 0.95, "top_k": 0, "options": {}}
                 headers: dict[str, object] = {"headers": {}}
                 if self._hooks:
                     user_text = "".join([p.text for p in user.parts if getattr(p, "type", "") == "text"])

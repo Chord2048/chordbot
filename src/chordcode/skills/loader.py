@@ -26,6 +26,8 @@ class SkillLoader:
     SEARCH_PATTERNS: tuple[str, ...] = (
         "skills/*/SKILL.md",
         ".claude/skills/*/SKILL.md",
+        ".chordcode/skills/*/SKILL.md",
+        ".claude/skills/*/SKILL.md",
         ".agents/skills/*/SKILL.md",
         ".opencode/skill/*/SKILL.md",
         ".opencode/skills/*/SKILL.md",

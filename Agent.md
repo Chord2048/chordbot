@@ -83,7 +83,7 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - `src/chordcode/api/app.py`：HTTP API、SSE、web 静态文件挂载、run/interrupt 端点、组装工具上下文
 - `src/chordcode/loop/session_loop.py`：核心编排（LLM 流式、tool_calls、permission gate、落库、发事件、中断）
 - `src/chordcode/model.py`：Message/Part/Permission 等 Pydantic 模型（前后端对齐的“协议层”）
-- `src/chordcode/tools/`：工具实现（bash/read/write）+ path 限制/截断 + registry
+- `src/chordcode/tools/`：工具实现（bash/read/write/skill/todowrite）+ path 限制/截断 + registry
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
 - `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板）
@@ -135,6 +135,15 @@ uv run python -m unittest discover -s tests -q
 - `todowrite`：已实现。输入结构化 todo 列表，输出任务状态与统计，用于过程跟踪。
 - `skill`：已实现。按名称加载技能正文（`skill(name=...)`）；可用技能列表通过 `skill` 工具 description 内嵌的 `<available_skills>` 暴露。
 - `task`：规划中。输入“任务说明 + 目标输出格式 + 限制”，输出子任务结果摘要（后续接入真正的 subagent runtime）。
+
+**Skills 功能说明（已实现 v1）**
+- `Skills 是什么`：Skill 是一个可版本化的能力包目录，核心文件是 `SKILL.md`（YAML frontmatter + Markdown 正文）；模型平时只看到 metadata，需要时再按名加载正文。
+- `Skills 在哪些目录`（仅扫描当前 session worktree 范围）：`skills/*/SKILL.md`、`.claude/skills/*/SKILL.md`、`.agents/skills/*/SKILL.md`、`.opencode/skill/*/SKILL.md`、`.opencode/skills/*/SKILL.md`。
+- `项目里怎么实现`：
+  1. 发现与校验：`src/chordcode/skills/loader.py`（从 `cwd` 向上到 `worktree` 扫描；校验 `name/description`、目录名一致性、name regex）。
+  2. 工具暴露与按需加载：`src/chordcode/tools/skill.py`（description 生成 `<available_skills>`；执行时加载正文并返回 `<skill_content>` + `<skill_files>`）。
+  3. 运行时接线：`src/chordcode/api/app.py` 在 `ToolRegistry` 注册 `SkillTool`。
+  4. 权限控制：`permission="skill"`；规则评估复用 `src/chordcode/permission/rules.py`，`deny` 的 skill 不会出现在可用列表中。
 
 **新增/调整一个 Hook 点**
 1. 在 `src/chordcode/hookdefs.py` 添加 hook 名与 input/output schema

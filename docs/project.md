@@ -85,8 +85,9 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - `chord-code/src/chordcode/loop/`：SessionLoop（核心编排）+ **InterruptManager（中断管理）**
 - `chord-code/src/chordcode/model.py`：Pydantic schema（messages/parts/permission…）
 - `chord-code/src/chordcode/permission/`：ask/allow/deny + approvals 持久化
+- `chord-code/src/chordcode/skills/`：Skills 发现与加载（`SKILL.md`）
 - `chord-code/src/chordcode/store/`：SQLite schema + CRUD
-- `chord-code/src/chordcode/tools/`：bash/read/write + registry + path/截断
+- `chord-code/src/chordcode/tools/`：bash/read/write/skill/todowrite + registry + path/截断
 - `chord-code/web/`：前端静态文件（HTML/CSS/JS）
 - `chord-code/docs/`：项目文档
 - `chord-code/CHANGES.md`：详细改动日志
@@ -260,6 +261,7 @@ v0.1 建议的权限类别：
 
 ### 4.4.1 Skills（按需加载）
 
+- Skills 是“可复用的说明文档能力包”：每个 skill 是一个目录，必须包含 `SKILL.md`。该文件由 YAML frontmatter（触发 metadata）+ Markdown 正文（执行流程）组成。
 - 发现范围（仅 worktree 内）：`skills/`、`.claude/skills/`、`.agents/skills/`、`.opencode/skill/`、`.opencode/skills/`
 - 每个技能目录需包含 `SKILL.md`，且需 YAML frontmatter：
   - `name`（必填，且必须与目录名一致，regex：`^[a-z0-9]+(-[a-z0-9]+)*$`）
@@ -268,6 +270,20 @@ v0.1 建议的权限类别：
   - `skill` 工具 description 仅暴露 `<available_skills>`（name/description/location）
   - 模型按需调用 `skill(name=...)` 后，正文作为 tool result 注入后续上下文
   - `permission=skill` 生效；命中 `deny` 的技能不会暴露在可用列表中
+
+实现落点（代码）：
+- `src/chordcode/skills/loader.py`
+  - 从 session `cwd` 向上遍历到 `worktree` 扫描 skill 目录
+  - 解析并校验 frontmatter，过滤非法 skill
+  - 支持同名去重（近处优先）和资源文件采样（用于 tool output hints）
+- `src/chordcode/tools/skill.py`
+  - 构造 `skill` 工具 description（含 `<available_skills>`）
+  - 执行时按名称加载 skill 正文，返回 `<skill_content>` 和 `<skill_files>`
+  - 在执行前调用 `ctx.ask(permission="skill", patterns=[name], always=[name], ...)`
+- `src/chordcode/api/app.py`
+  - 在 `/sessions/{session_id}/run` 里将 `SkillTool` 注册到 `ToolRegistry`
+- `src/chordcode/permission/rules.py`
+  - 提供可复用的权限评估函数，供 PermissionService 与 SkillTool 的“deny 隐藏”逻辑共用
 
 ### 4.5 前端渲染逻辑（Part-based Display）
 
@@ -473,18 +489,17 @@ v0.1 建议的权限类别：
   - 包装为标准 Tool
   - 权限系统集成
 
-### v0.6（Skill System - 🟡 高优先级）
-**目标**：可复用的“说明文档能力”（按需注入上下文）
+### v0.6（Skill System - ✅ 已完成 v1，继续增强）
+已完成能力（当前）：
+- `skill` 工具：按需加载 `SKILL.md` 正文，不做常驻注入
+- 目录发现：`skills/`、`.claude/skills/`、`.agents/skills/`、`.opencode/skill/`、`.opencode/skills/`（worktree 范围）
+- 权限控制：`permission.skill` 支持 `allow/deny/ask`；`deny` skill 对模型不可见
+- 实现模块：`src/chordcode/skills/loader.py`、`src/chordcode/tools/skill.py`
 
-核心能力：
-- **Agent Skill（`SKILL.md`）是什么**：本质是“可版本化的操作手册/领域指南”，不是插件、也不是代码；它通过 `skill` 工具被按需加载进对话上下文
-- **Skill 发现（discovery）**：从当前 `cwd` 向上遍历到 git worktree，收集沿途的 `.chordcode/` 目录并扫描其中 `{skill,skills}/**/SKILL.md`；可选兼容 `.claude/skills/**/SKILL.md`；并支持全局 `~/.config/chordcode/skills/**/SKILL.md`（可选：`~/.claude/skills/**/SKILL.md`）
-- **`skill` 工具（按需加载，而非全量注入）**
-  - 工具 description 内嵌 `<available_skills>`（name + description），让模型先“选 skill 再加载内容”
-  - `skill({name})` 读取对应 `SKILL.md` 正文（附带 base directory），作为工具输出进入上下文
-  - 采用单工具设计：不额外提供 `skills` 发现工具，避免能力重叠
-- **权限集成**：`permission.skill` 以 pattern 控制 `allow/deny/ask`；`deny` 的 skill 对模型不可见（不会出现在 `<available_skills>`）
-  - 可选：支持 per-agent 覆盖权限与禁用 `skill` 工具（某些 agent 不应加载任何 skills）
+后续增强（v1.x/v2）：
+- 支持全局目录（如 `~/.claude/skills`）与配置化 skills paths
+- per-agent skill 可见性和禁用策略
+- skill 资源索引增强（大目录采样策略、可选检索提示）
 
 ### v0.7（Advanced Features - 🟢 中优先级）
 - **Snapshot/Diff 追踪**：文件变更追踪和上下文
@@ -571,6 +586,8 @@ v0.1 建议的权限类别：
 - **Interrupt**：`chord-code/src/chordcode/loop/interrupt.py`（中断管理，v0.1.1 新增）
 - LLM：`chord-code/src/chordcode/llm/openai_chat.py`
 - Tools：`chord-code/src/chordcode/tools/`
+- Skills：`chord-code/src/chordcode/skills/loader.py`
+- Skill Tool：`chord-code/src/chordcode/tools/skill.py`
 - Permission：`chord-code/src/chordcode/permission/service.py`
 - Store：`chord-code/src/chordcode/store/sqlite.py`
 - Model：`chord-code/src/chordcode/model.py`（核心数据结构，包含 Part 定义）
@@ -586,6 +603,6 @@ v0.1 建议的权限类别：
 
 ---
 
-**最后更新**：2026-02-04  
+**最后更新**：2026-02-06  
 **当前版本**：v0.1.1 MVP+  
 **状态**：生产可用（本地部署）

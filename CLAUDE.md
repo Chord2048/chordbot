@@ -30,7 +30,7 @@
 - 权限系统（ask/allow/deny + approvals 持久化）：`src/chordcode/permission/service.py`
 - 事件总线（进程内 pub/sub）+ SSE：`src/chordcode/bus/bus.py`、`/events`
 - SQLite 持久化：`src/chordcode/store/sqlite.py`
-- 工具（当前：bash/read/write）与 registry：`src/chordcode/tools/*`
+- 工具（当前：bash/read/write/skill/todowrite）与 registry：`src/chordcode/tools/*`
 - Hooks（用于在关键生命周期点做可插拔改写/观测）：`src/chordcode/hooks.py`、`src/chordcode/hookdefs.py`
 - Langfuse（可选）：`docs/langfuse.md`、`src/chordcode/observability/*`
 
@@ -83,7 +83,7 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - `src/chordcode/api/app.py`：HTTP API、SSE、web 静态文件挂载、run/interrupt 端点、组装工具上下文
 - `src/chordcode/loop/session_loop.py`：核心编排（LLM 流式、tool_calls、permission gate、落库、发事件、中断）
 - `src/chordcode/model.py`：Message/Part/Permission 等 Pydantic 模型（前后端对齐的“协议层”）
-- `src/chordcode/tools/`：工具实现（bash/read/write）+ path 限制/截断 + registry
+- `src/chordcode/tools/`：工具实现（bash/read/write/skill/todowrite）+ path 限制/截断 + registry
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
 - `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板）
@@ -131,10 +131,19 @@ uv run python -m unittest discover -s tests -q
 3. 在 `permission` 里定义/使用对应 permission（通常是 tool 名或更细粒度的类别）
 4. 更新 `docs/project.md`（工具列表/权限类别）与 Web UI（如需要新展示）
 
-**近期要加的 3 个工具（建议的最小可用定义）**
-- `todo`：输入为“目标/约束/偏好”，输出为结构化 todo（步骤、优先级、可并行项、验收标准）；用于 UI 展示与后续执行跟踪（先不要求自动执行）。
-- `task`：输入为“任务说明 + 目标输出格式 + 限制”，输出为子任务结果摘要（后续再接入真正的 subagent/多 agent runtime）。
-- `skill`：按名称加载技能正文（`skill(name=...)`）；可用技能列表通过 `skill` 工具 description 内嵌的 `<available_skills>` 暴露（对齐 OpenCode 的按需加载思路）。
+**内置工具（当前与近期）**
+- `todowrite`：已实现。输入结构化 todo 列表，输出任务状态与统计，用于过程跟踪。
+- `skill`：已实现。按名称加载技能正文（`skill(name=...)`）；可用技能列表通过 `skill` 工具 description 内嵌的 `<available_skills>` 暴露。
+- `task`：规划中。输入“任务说明 + 目标输出格式 + 限制”，输出子任务结果摘要（后续接入真正的 subagent runtime）。
+
+**Skills 功能说明（已实现 v1）**
+- `Skills 是什么`：Skill 是一个可版本化的能力包目录，核心文件是 `SKILL.md`（YAML frontmatter + Markdown 正文）；模型平时只看到 metadata，需要时再按名加载正文。
+- `Skills 在哪些目录`（仅扫描当前 session worktree 范围）：`skills/*/SKILL.md`、`.claude/skills/*/SKILL.md`、`.agents/skills/*/SKILL.md`、`.opencode/skill/*/SKILL.md`、`.opencode/skills/*/SKILL.md`。
+- `项目里怎么实现`：
+  1. 发现与校验：`src/chordcode/skills/loader.py`（从 `cwd` 向上到 `worktree` 扫描；校验 `name/description`、目录名一致性、name regex）。
+  2. 工具暴露与按需加载：`src/chordcode/tools/skill.py`（description 生成 `<available_skills>`；执行时加载正文并返回 `<skill_content>` + `<skill_files>`）。
+  3. 运行时接线：`src/chordcode/api/app.py` 在 `ToolRegistry` 注册 `SkillTool`。
+  4. 权限控制：`permission="skill"`；规则评估复用 `src/chordcode/permission/rules.py`，`deny` 的 skill 不会出现在可用列表中。
 
 **新增/调整一个 Hook 点**
 1. 在 `src/chordcode/hookdefs.py` 添加 hook 名与 input/output schema

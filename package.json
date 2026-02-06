@@ -1,0 +1,19 @@
+{
+  "name": "chord-code",
+  "version": "1.0.0",
+  "description": "Local-first agent core inspired by Open Code: agent loop, tool registry, event bus (SSE), SQLite persistence, and permission gates.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.58.1",
+    "@types/node": "^25.2.1"
+  }
+}
