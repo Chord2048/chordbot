@@ -162,32 +162,197 @@
   background: var(--danger);
 }
 
-/* Logs Tab (placeholder) */
-.logs-list {
-  font-family: var(--font-mono);
+/* Logs Tab */
+.logs-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.logs-filters {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.logs-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logs-filter-label {
+  min-width: 52px;
+  color: var(--muted);
   font-size: 11px;
+}
+
+.logs-filter-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  font-size: 12px;
+}
+
+.logs-filter-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.logs-error {
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 91, 110, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 91, 110, 0.12);
+  color: #ff8a98;
+  font-size: 12px;
+}
+
+.logs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 8px 0;
 }
 
-.log-item {
-  padding: 4px 12px;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
+.log-row {
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-light);
 }
 
-.log-item:hover {
-  background: rgba(255, 255, 255, 0.02);
+.log-row-main {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 96px 64px minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 8px;
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  align-items: center;
 }
 
-.log-item .level {
-  font-weight: 600;
+.log-row-main:hover .log-message {
+  color: var(--text);
 }
 
-.log-item .level.info { color: var(--accent); }
-.log-item .level.warn { color: var(--warning); }
-.log-item .level.error { color: var(--danger); }
+.log-time {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-level {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.log-level.debug {
+  color: #8fb3ff;
+  border-color: rgba(143, 179, 255, 0.4);
+  background: rgba(143, 179, 255, 0.12);
+}
+
+.log-level.info {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-light);
+}
+
+.log-level.warning {
+  color: var(--warning);
+  border-color: rgba(245, 166, 35, 0.4);
+  background: var(--warning-light);
+}
+
+.log-level.error {
+  color: var(--danger);
+  border-color: rgba(255, 91, 110, 0.4);
+  background: var(--danger-light);
+}
+
+.log-event {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-message {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-meta {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.log-raw {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.logs-pagination {
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logs-pagination-stat {
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.logs-pagination-actions {
+  display: flex;
+  gap: 6px;
+}
 
 /* Empty states */
 .observability-empty {

@@ -55,6 +55,13 @@
       return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
 
+    function formatDateTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    }
+
     function formatRelative(ts) {
       if (!ts) return '';
       const diff = Date.now() - ts;
@@ -126,6 +133,18 @@
       const [observabilityTab, setObservabilityTab] = useState('events');
       const [observabilityCollapsed, setObservabilityCollapsed] = useState(false);
       const [defaultWorktree, setDefaultWorktree] = useState('');
+      const [logFiles, setLogFiles] = useState([]);
+      const [selectedLogDate, setSelectedLogDate] = useState('');
+      const [logFilters, setLogFilters] = useState({ level: '', event: '', session_id: '', q: '' });
+      const [logItems, setLogItems] = useState([]);
+      const [logTotal, setLogTotal] = useState(0);
+      const [logOffset, setLogOffset] = useState(0);
+      const [logLimit, setLogLimit] = useState(100);
+      const [logHasMore, setLogHasMore] = useState(false);
+      const [logLoading, setLogLoading] = useState(false);
+      const [logError, setLogError] = useState('');
+      const [expandedLogLineNo, setExpandedLogLineNo] = useState(null);
+      const [logFiltersInitialized, setLogFiltersInitialized] = useState(false);
 
       // Handle SSE events
       const handleSSEEvent = useCallback((event) => {
@@ -192,6 +211,19 @@
         }).catch(e => console.error('Sessions error:', e));
       }, []);
 
+      useEffect(() => {
+        if (!logFiltersInitialized && activeSessionId) {
+          setLogFilters(prev => ({ ...prev, session_id: prev.session_id || activeSessionId }));
+          setLogFiltersInitialized(true);
+        }
+      }, [activeSessionId, logFiltersInitialized]);
+
+      useEffect(() => {
+        if (observabilityTab === 'logs') {
+          refreshLogs();
+        }
+      }, [observabilityTab]);
+
       // Select session
       async function selectSession(id) {
         setActiveSessionId(id);
@@ -253,6 +285,112 @@
         }
       }
 
+      async function requestLogs(date, offset, filters, limit = logLimit) {
+        const params = new URLSearchParams();
+        params.set('date', date);
+        params.set('offset', String(Math.max(0, offset)));
+        params.set('limit', String(limit));
+
+        const normalized = {
+          level: (filters.level || '').trim(),
+          event: (filters.event || '').trim(),
+          session_id: (filters.session_id || '').trim(),
+          q: (filters.q || '').trim(),
+        };
+        if (normalized.level) params.set('level', normalized.level);
+        if (normalized.event) params.set('event', normalized.event);
+        if (normalized.session_id) params.set('session_id', normalized.session_id);
+        if (normalized.q) params.set('q', normalized.q);
+
+        const data = await api('/logs?' + params.toString());
+        setLogItems(data.items || []);
+        setLogTotal(data.total || 0);
+        setLogOffset(data.offset || 0);
+        setLogLimit(data.limit || limit);
+        setLogHasMore(Boolean(data.has_more));
+        setExpandedLogLineNo(null);
+      }
+
+      async function refreshLogs() {
+        setLogLoading(true);
+        setLogError('');
+        try {
+          const data = await api('/logs/files');
+          const files = data.files || [];
+          setLogFiles(files);
+
+          let nextDate = selectedLogDate;
+          if (!nextDate || !files.some(f => f.date === nextDate)) {
+            nextDate = data.default_date || '';
+          }
+          setSelectedLogDate(nextDate);
+
+          let nextFilters = logFilters;
+          if (!logFiltersInitialized && activeSessionId) {
+            nextFilters = { ...logFilters, session_id: activeSessionId };
+            setLogFilters(nextFilters);
+            setLogFiltersInitialized(true);
+          }
+
+          if (nextDate) {
+            await requestLogs(nextDate, 0, nextFilters, logLimit);
+          } else {
+            setLogItems([]);
+            setLogTotal(0);
+            setLogOffset(0);
+            setLogHasMore(false);
+          }
+        } catch (e) {
+          setLogError('Failed to load logs: ' + e.message);
+          setLogItems([]);
+          setLogTotal(0);
+          setLogOffset(0);
+          setLogHasMore(false);
+        } finally {
+          setLogLoading(false);
+        }
+      }
+
+      async function runLogSearch(offset = 0, filters = logFilters) {
+        if (!selectedLogDate) {
+          setLogError('Please select a log date first.');
+          setLogItems([]);
+          setLogTotal(0);
+          setLogOffset(0);
+          setLogHasMore(false);
+          return;
+        }
+        setLogLoading(true);
+        setLogError('');
+        try {
+          await requestLogs(selectedLogDate, offset, filters, logLimit);
+        } catch (e) {
+          setLogError('Failed to load logs: ' + e.message);
+          setLogItems([]);
+          setLogTotal(0);
+          setLogOffset(0);
+          setLogHasMore(false);
+        } finally {
+          setLogLoading(false);
+        }
+      }
+
+      function handleLogFilterChange(field, value) {
+        setLogFilters(prev => ({ ...prev, [field]: value }));
+      }
+
+      function handleResetLogFilters() {
+        const nextFilters = {
+          level: '',
+          event: '',
+          session_id: activeSessionId || '',
+          q: '',
+        };
+        setLogFilters(nextFilters);
+        setLogFiltersInitialized(true);
+        runLogSearch(0, nextFilters);
+      }
+
       const activeSession = sessions.find(s => s.id === activeSessionId);
 
       return html`
@@ -287,6 +425,25 @@
             onTabChange=${setObservabilityTab}
             onClearEvents=${() => setEvents([])}
             collapsed=${observabilityCollapsed}
+            logFiles=${logFiles}
+            selectedLogDate=${selectedLogDate}
+            onSelectedLogDateChange=${setSelectedLogDate}
+            logFilters=${logFilters}
+            onLogFilterChange=${handleLogFilterChange}
+            onLogSearch=${() => runLogSearch(0, logFilters)}
+            onLogReset=${handleResetLogFilters}
+            onLogPrevPage=${() => runLogSearch(Math.max(0, logOffset - logLimit), logFilters)}
+            onLogNextPage=${() => runLogSearch(logOffset + logLimit, logFilters)}
+            onRefreshLogs=${refreshLogs}
+            logItems=${logItems}
+            logTotal=${logTotal}
+            logOffset=${logOffset}
+            logLimit=${logLimit}
+            logHasMore=${logHasMore}
+            logLoading=${logLoading}
+            logError=${logError}
+            expandedLogLineNo=${expandedLogLineNo}
+            onToggleLogExpand=${(lineNo) => setExpandedLogLineNo(prev => (prev === lineNo ? null : lineNo))}
           />
         </div>
       `;
@@ -686,7 +843,33 @@
     }
 
     // ============ ObservabilityPanel ============
-    function ObservabilityPanel({ events, todos, tab, onTabChange, onClearEvents, collapsed }) {
+    function ObservabilityPanel({
+      events,
+      todos,
+      tab,
+      onTabChange,
+      onClearEvents,
+      collapsed,
+      logFiles,
+      selectedLogDate,
+      onSelectedLogDateChange,
+      logFilters,
+      onLogFilterChange,
+      onLogSearch,
+      onLogReset,
+      onLogPrevPage,
+      onLogNextPage,
+      onRefreshLogs,
+      logItems,
+      logTotal,
+      logOffset,
+      logLimit,
+      logHasMore,
+      logLoading,
+      logError,
+      expandedLogLineNo,
+      onToggleLogExpand,
+    }) {
       if (collapsed) {
         return html`
           <aside class="observability-panel" style="width: 48px; min-width: 48px;">
@@ -701,12 +884,36 @@
             <div class="tabs">
               <button class="tab ${tab === 'events' ? 'active' : ''}" onClick=${() => onTabChange('events')}>Events</button>
               <button class="tab ${tab === 'todos' ? 'active' : ''}" onClick=${() => onTabChange('todos')}>Todos</button>
+              <button class="tab ${tab === 'logs' ? 'active' : ''}" onClick=${() => onTabChange('logs')}>Logs</button>
             </div>
             ${tab === 'events' && html`<div class="panel-actions"><button class="icon-btn" onClick=${onClearEvents} title="Clear">🗑</button></div>`}
           </div>
           <div class="observability-content">
             ${tab === 'events' && html`<${EventsTab} events=${events} />`}
             ${tab === 'todos' && html`<${TodosTab} todos=${todos} />`}
+            ${tab === 'logs' && html`
+              <${LogsTab}
+                files=${logFiles}
+                selectedDate=${selectedLogDate}
+                onSelectedDateChange=${onSelectedLogDateChange}
+                filters=${logFilters}
+                onFilterChange=${onLogFilterChange}
+                onSearch=${onLogSearch}
+                onReset=${onLogReset}
+                onPrevPage=${onLogPrevPage}
+                onNextPage=${onLogNextPage}
+                onRefresh=${onRefreshLogs}
+                items=${logItems}
+                total=${logTotal}
+                offset=${logOffset}
+                limit=${logLimit}
+                hasMore=${logHasMore}
+                loading=${logLoading}
+                error=${logError}
+                expandedLineNo=${expandedLogLineNo}
+                onToggleExpand=${onToggleLogExpand}
+              />
+            `}
           </div>
         </aside>
       `;
@@ -766,6 +973,149 @@
                 </div>
               </div>
             `)}
+          </div>
+        </div>
+      `;
+    }
+
+    // ============ LogsTab ============
+    function LogsTab({
+      files,
+      selectedDate,
+      onSelectedDateChange,
+      filters,
+      onFilterChange,
+      onSearch,
+      onReset,
+      onPrevPage,
+      onNextPage,
+      onRefresh,
+      items,
+      total,
+      offset,
+      limit,
+      hasMore,
+      loading,
+      error,
+      expandedLineNo,
+      onToggleExpand,
+    }) {
+      const levelClass = (level) => String(level || '').toLowerCase();
+      const from = total > 0 ? offset + 1 : 0;
+      const to = total > 0 ? offset + items.length : 0;
+
+      return html`
+        <div class="logs-container">
+          <div class="logs-filters">
+            <div class="logs-filter-row">
+              <label class="logs-filter-label">Date</label>
+              <select
+                class="input logs-filter-input"
+                value=${selectedDate}
+                onChange=${(e) => onSelectedDateChange(e.target.value)}
+              >
+                <option value="">Select date</option>
+                ${files.map(file => html`
+                  <option key=${file.date} value=${file.date}>${file.date}</option>
+                `)}
+              </select>
+            </div>
+            <div class="logs-filter-row">
+              <label class="logs-filter-label">Level</label>
+              <select
+                class="input logs-filter-input"
+                value=${filters.level}
+                onChange=${(e) => onFilterChange('level', e.target.value)}
+              >
+                <option value="">All</option>
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+            </div>
+            <div class="logs-filter-row">
+              <label class="logs-filter-label">Event</label>
+              <input
+                class="input logs-filter-input"
+                type="text"
+                value=${filters.event}
+                onInput=${(e) => onFilterChange('event', e.target.value)}
+                placeholder="contains..."
+              />
+            </div>
+            <div class="logs-filter-row">
+              <label class="logs-filter-label">Session</label>
+              <input
+                class="input logs-filter-input"
+                type="text"
+                value=${filters.session_id}
+                onInput=${(e) => onFilterChange('session_id', e.target.value)}
+                placeholder="exact session_id"
+              />
+            </div>
+            <div class="logs-filter-row">
+              <label class="logs-filter-label">Keyword</label>
+              <input
+                class="input logs-filter-input"
+                type="text"
+                value=${filters.q}
+                onInput=${(e) => onFilterChange('q', e.target.value)}
+                placeholder="search all fields"
+              />
+            </div>
+            <div class="logs-filter-actions">
+              <button class="btn btn-sm" onClick=${onSearch} disabled=${loading || !selectedDate}>Search</button>
+              <button class="btn btn-sm" onClick=${onReset} disabled=${loading}>Reset</button>
+              <button class="icon-btn" onClick=${onRefresh} title="Refresh file list" disabled=${loading}>↻</button>
+            </div>
+          </div>
+
+          ${error && html`<div class="logs-error">${error}</div>`}
+
+          ${loading && html`
+            <div class="observability-empty">
+              <div class="spinner"></div>
+              <div class="observability-empty-text">Loading logs...</div>
+            </div>
+          `}
+
+          ${!loading && !error && items.length === 0 && html`
+            <div class="observability-empty">
+              <div class="observability-empty-icon">🗒</div>
+              <div class="observability-empty-text">No logs matched</div>
+            </div>
+          `}
+
+          ${!loading && !error && items.length > 0 && html`
+            <div class="logs-list">
+              ${items.map(item => html`
+                <div key=${item.line_no} class="log-row">
+                  <button class="log-row-main" onClick=${() => onToggleExpand(item.line_no)}>
+                    <span class="log-time">${formatDateTime(item.ts)}</span>
+                    <span class="log-level ${levelClass(item.level)}">${item.level || '-'}</span>
+                    <span class="log-event">${item.event || '-'}</span>
+                    <span class="log-message">${item.message || ''}</span>
+                  </button>
+                  <div class="log-meta">
+                    <span>line ${item.line_no}</span>
+                    ${item.session_id && html`<span>sid: ${item.session_id}</span>`}
+                    ${item.module && html`<span>${item.module}${item.function ? ':' + item.function : ''}</span>`}
+                  </div>
+                  ${expandedLineNo === item.line_no && html`
+                    <pre class="log-raw">${JSON.stringify(item.raw, null, 2)}</pre>
+                  `}
+                </div>
+              `)}
+            </div>
+          `}
+
+          <div class="logs-pagination">
+            <span class="logs-pagination-stat">${from}-${to} / ${total}</span>
+            <div class="logs-pagination-actions">
+              <button class="btn btn-sm" onClick=${onPrevPage} disabled=${loading || offset <= 0}>Prev</button>
+              <button class="btn btn-sm" onClick=${onNextPage} disabled=${loading || !hasMore}>Next</button>
+            </div>
           </div>
         </div>
       `;

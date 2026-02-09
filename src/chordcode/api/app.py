@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -62,6 +63,10 @@ llm = OpenAIChatProvider(
 )
 interrupt = InterruptManager()
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_LOG_FILE_RE = re.compile(r"^chordcode_(\d{4}-\d{2}-\d{2})\.jsonl$")
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
+
 
 def _default_rules() -> list[PermissionRule]:
     return [
@@ -100,6 +105,140 @@ async def home():
 @app.get("/config")
 async def get_config():
     return {"default_worktree": cfg.default_worktree}
+
+
+def _resolve_log_dir() -> Path:
+    raw = os.environ.get("CHORDCODE_LOG_DIR", "./data/logs").strip() or "./data/logs"
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (Path.cwd() / p).resolve()
+    return p
+
+
+def _validate_date(value: str) -> str:
+    date = value.strip()
+    if not _DATE_RE.fullmatch(date):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    return date
+
+
+def _list_log_files(log_dir: Path) -> list[dict[str, object]]:
+    if not log_dir.exists() or not log_dir.is_dir():
+        return []
+    files: list[dict[str, object]] = []
+    for p in log_dir.iterdir():
+        if not p.is_file():
+            continue
+        m = _LOG_FILE_RE.fullmatch(p.name)
+        if not m:
+            continue
+        stat = p.stat()
+        files.append(
+            {
+                "date": m.group(1),
+                "name": p.name,
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime * 1000),
+            },
+        )
+    files.sort(key=lambda x: str(x["date"]), reverse=True)
+    return files
+
+
+def _log_file_for_date(log_dir: Path, date: str) -> Path:
+    return log_dir / f"chordcode_{date}.jsonl"
+
+
+@app.get("/logs/files")
+async def list_log_files():
+    log_dir = _resolve_log_dir()
+    files = _list_log_files(log_dir)
+    return {
+        "log_dir": str(log_dir),
+        "files": files,
+        "default_date": files[0]["date"] if files else None,
+    }
+
+
+@app.get("/logs")
+async def list_logs(
+    date: str,
+    offset: int = 0,
+    limit: int = 100,
+    level: str | None = None,
+    event: str | None = None,
+    session_id: str | None = None,
+    q: str | None = None,
+):
+    date = _validate_date(date)
+    if offset < 0:
+        offset = 0
+    limit = max(1, min(limit, 500))
+
+    level_norm = (level or "").strip().upper()
+    if level_norm and level_norm not in _LOG_LEVELS:
+        raise HTTPException(status_code=400, detail="level must be one of DEBUG, INFO, WARNING, ERROR")
+    event_norm = (event or "").strip().lower()
+    session_norm = (session_id or "").strip()
+    q_norm = (q or "").strip().lower()
+
+    log_dir = _resolve_log_dir()
+    path = _log_file_for_date(log_dir, date)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"log file not found for date {date}")
+
+    matched: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            line_text = line.strip()
+            if not line_text:
+                continue
+            try:
+                raw_obj = json.loads(line_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(raw_obj, dict):
+                continue
+
+            item_level = str(raw_obj.get("level") or "").upper()
+            item_event = str(raw_obj.get("event") or "")
+            item_session = str(raw_obj.get("session_id") or "")
+            item_text = json.dumps(raw_obj, ensure_ascii=False, separators=(",", ":")).lower()
+
+            if level_norm and item_level != level_norm:
+                continue
+            if event_norm and event_norm not in item_event.lower():
+                continue
+            if session_norm and item_session != session_norm:
+                continue
+            if q_norm and q_norm not in item_text:
+                continue
+
+            matched.append(
+                {
+                    "line_no": i,
+                    "ts": raw_obj.get("ts"),
+                    "level": raw_obj.get("level"),
+                    "event": raw_obj.get("event"),
+                    "session_id": raw_obj.get("session_id"),
+                    "message": raw_obj.get("message"),
+                    "module": raw_obj.get("module"),
+                    "function": raw_obj.get("function"),
+                    "raw": raw_obj,
+                },
+            )
+
+    matched.reverse()  # newest first
+    total = len(matched)
+    page = matched[offset : offset + limit]
+    return {
+        "date": date,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "has_more": (offset + limit) < total,
+        "items": page,
+    }
 
 
 @app.post("/sessions")
