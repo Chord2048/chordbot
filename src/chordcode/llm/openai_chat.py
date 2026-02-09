@@ -28,6 +28,12 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ReasoningDelta:
+    type: str
+    text: str
+
+
+@dataclass(frozen=True)
 class Finish:
     type: str
     reason: str
@@ -39,7 +45,45 @@ class Error:
     message: str
 
 
-LLMEvent = TextDelta | ToolCall | Finish | Error
+LLMEvent = TextDelta | ReasoningDelta | ToolCall | Finish | Error
+
+
+def _extract_delta_field(delta: Any, field: str) -> Any:
+    direct = getattr(delta, field, None)
+    if direct is not None:
+        return direct
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        return extra.get(field)
+    return None
+
+
+def _coerce_reasoning_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "reasoning_content", "content"):
+            out = _coerce_reasoning_text(value.get(key))
+            if out:
+                return out
+        return ""
+    if isinstance(value, list):
+        return "".join(_coerce_reasoning_text(item) for item in value)
+    text_attr = getattr(value, "text", None)
+    if isinstance(text_attr, str):
+        return text_attr
+    content_attr = getattr(value, "content", None)
+    if content_attr is not None:
+        return _coerce_reasoning_text(content_attr)
+    return ""
+
+
+def _extract_reasoning_text(delta: Any) -> str:
+    for field in ("reasoning_content", "reasoning"):
+        text = _coerce_reasoning_text(_extract_delta_field(delta, field))
+        if text:
+            return text
+    return ""
 
 
 class OpenAIChatProvider:
@@ -110,6 +154,10 @@ class OpenAIChatProvider:
 
             if delta.content:
                 yield TextDelta(type="text_delta", text=delta.content)
+
+            reasoning_text = _extract_reasoning_text(delta)
+            if reasoning_text:
+                yield ReasoningDelta(type="reasoning_delta", text=reasoning_text)
 
             if delta.tool_calls:
                 for tc in delta.tool_calls:

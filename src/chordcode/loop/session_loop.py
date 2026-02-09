@@ -12,13 +12,14 @@ from chordcode.bus.bus import Bus, Event
 from chordcode.config import Config
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker
-from chordcode.llm.openai_chat import Finish, OpenAIChatProvider, TextDelta, ToolCall
+from chordcode.llm.openai_chat import Finish, OpenAIChatProvider, ReasoningDelta, TextDelta, ToolCall
 from chordcode.loop.interrupt import InterruptManager
 from chordcode.model import (
     Message,
     MessageWithParts,
     ModelRef,
     PermissionRule,
+    ReasoningPart,
     TextPart,
     ToolPart,
     ToolStateCompleted,
@@ -247,7 +248,7 @@ class SessionLoop:
 
             # Track current text part for streaming
             current_text_part: TextPart | None = None
-            current_text_part_id: str | None = None
+            current_reasoning_part: ReasoningPart | None = None
 
             try:
                 system = self._cfg.system_prompt
@@ -350,9 +351,8 @@ class SessionLoop:
                         assistant_chars += len(evt.text)
                         # Create new text part if needed
                         if not current_text_part:
-                            current_text_part_id = str(uuid4())
                             current_text_part = TextPart(
-                                id=current_text_part_id,
+                                id=str(uuid4()),
                                 message_id=assistant_id,
                                 session_id=session_id,
                                 text=evt.text,
@@ -375,12 +375,44 @@ class SessionLoop:
                         )
                         continue
 
+                    if isinstance(evt, ReasoningDelta):
+                        if not current_reasoning_part:
+                            current_reasoning_part = ReasoningPart(
+                                id=str(uuid4()),
+                                message_id=assistant_id,
+                                session_id=session_id,
+                                text=evt.text,
+                                time={"start": int(time.time() * 1000)},
+                            )
+                        else:
+                            current_reasoning_part.text += evt.text
+
+                        await self._bus.publish(
+                            Event(
+                                type="message.part.updated",
+                                properties={
+                                    "session_id": session_id,
+                                    "message_id": assistant_id,
+                                    "part": current_reasoning_part.model_dump(),
+                                    "delta": evt.text,
+                                },
+                            ),
+                        )
+                        continue
+
                     if isinstance(evt, ToolCall):
                         calls.append(evt)
                         continue
 
                     if isinstance(evt, Finish):
                         reason = evt.reason
+                        if current_reasoning_part:
+                            current_reasoning_part.time = {
+                                "start": current_reasoning_part.time.get("start", 0),
+                                "end": int(time.time() * 1000),
+                            }
+                            await self._store.add_part(session_id, assistant_id, current_reasoning_part)
+                            current_reasoning_part = None
                         # Save final text part if exists
                         if current_text_part:
                             current_text_part.time = {
@@ -758,6 +790,7 @@ class SessionLoop:
                 continue
             if m.info.role == "assistant":
                 txt = "".join([p.text for p in m.parts if getattr(p, "type", "") == "text"])
+                reasoning = "".join([p.text for p in m.parts if getattr(p, "type", "") == "reasoning"])
                 calls: dict[str, dict[str, Any]] = {}
                 for p in m.parts:
                     if getattr(p, "type", "") != "tool":
@@ -774,6 +807,8 @@ class SessionLoop:
                         "function": {"name": p.tool, "arguments": args_json},
                     }
                 msg: dict[str, Any] = {"role": "assistant", "content": txt or ""}
+                if reasoning:
+                    msg["reasoning_content"] = reasoning
                 if calls:
                     msg["tool_calls"] = list(calls.values())
                 out.append(msg)

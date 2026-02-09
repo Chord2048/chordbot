@@ -25,8 +25,8 @@
   /* Chat Bubbles */
   --user-bubble: rgba(91, 156, 255, 0.08);
   --user-border: rgba(91, 156, 255, 0.25);
-  --assistant-bubble: rgba(255, 255, 255, 0.02);
-  --assistant-border: rgba(255, 255, 255, 0.08);
+  --assistant-bubble: rgba(220, 124, 246, 0.08);
+  --assistant-border: rgba(180, 115, 255, 0.25);
 
   /* Tool States */
   --tool-pending: #6b7d8e;

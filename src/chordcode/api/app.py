@@ -74,6 +74,14 @@ def _default_rules() -> list[PermissionRule]:
     ]
 
 
+async def _get_session_or_404(session_id: str) -> Session:
+    try:
+        return await store.get_session(session_id)
+    except KeyError as e:
+        detail = str(e.args[0]) if e.args else "session not found"
+        raise HTTPException(status_code=404, detail=detail)
+
+
 app = FastAPI(title="Chord Code", version="0.1.0")
 
 root = Path(__file__).resolve().parents[3]
@@ -270,6 +278,30 @@ async def list_sessions(limit: int = 50, offset: int = 0):
     """List all sessions, ordered by updated_at desc."""
     sessions = await store.list_sessions(limit=limit, offset=offset)
     return {"sessions": [s.model_dump() for s in sessions]}
+
+
+@app.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, body: dict):
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+    await _get_session_or_404(session_id)
+    session = await store.update_session_title(session_id, title)
+    await bus.publish(Event(type="session.updated", properties={"session_id": session_id, "info": session.model_dump()}))
+    return session
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    session = await _get_session_or_404(session_id)
+    await store.delete_session(session_id)
+    await bus.publish(
+        Event(
+            type="session.deleted",
+            properties={"session_id": session_id, "info": session.model_dump()},
+        ),
+    )
+    return {"ok": True, "session_id": session_id}
 
 
 @app.post("/sessions/{session_id}/messages")

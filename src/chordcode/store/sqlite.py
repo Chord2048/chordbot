@@ -179,6 +179,33 @@ class SQLiteStore:
                 for row in rows
             ]
 
+    async def update_session_title(self, session_id: str, title: str) -> Session:
+        now = int(time.time() * 1000)
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "UPDATE sessions SET title=?, updated_at=? WHERE id=?",
+                (title, now, session_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"session not found: {session_id}")
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def delete_session(self, session_id: str) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,))
+            if not await cur.fetchone():
+                raise KeyError(f"session not found: {session_id}")
+
+            # Cascade delete related rows owned by the session.
+            await db.execute("DELETE FROM parts WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM permission_requests WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM permission_approvals WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM todos WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            await db.commit()
+
     async def add_message(self, message: Message) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(

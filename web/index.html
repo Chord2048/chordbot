@@ -93,8 +93,16 @@
     let sseSource = null;
     let sseCallback = null;
 
+    function disconnectSSE() {
+      if (sseSource) {
+        sseSource.close();
+        sseSource = null;
+      }
+      sseCallback = null;
+    }
+
     function connectSSE(sessionId, onEvent) {
-      if (sseSource) sseSource.close();
+      disconnectSSE();
       sseCallback = onEvent;
 
       const url = '/events?session_id=' + encodeURIComponent(sessionId);
@@ -116,6 +124,10 @@
       sseSource.onerror = () => {
         console.warn('[SSE] Connection error');
       };
+    }
+
+    function sortSessionsByUpdated(list) {
+      return [...list].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     }
 
     // ============ Main App ============
@@ -145,6 +157,7 @@
       const [logError, setLogError] = useState('');
       const [expandedLogLineNo, setExpandedLogLineNo] = useState(null);
       const [logFiltersInitialized, setLogFiltersInitialized] = useState(false);
+      const [sessionAction, setSessionAction] = useState({ renamingId: null, deletingId: null });
 
       // Handle SSE events
       const handleSSEEvent = useCallback((event) => {
@@ -204,9 +217,10 @@
         }).catch(e => console.error('Config error:', e));
 
         api('/sessions').then(data => {
-          setSessions(data.sessions || []);
+          const sessionList = sortSessionsByUpdated(data.sessions || []);
+          setSessions(sessionList);
           if (data.sessions && data.sessions.length > 0) {
-            selectSession(data.sessions[0].id);
+            selectSession(sessionList[0].id);
           }
         }).catch(e => console.error('Sessions error:', e));
       }, []);
@@ -224,8 +238,24 @@
         }
       }, [observabilityTab]);
 
+      function clearSessionView() {
+        setActiveSessionId(null);
+        setMessages(new Map());
+        setParts(new Map());
+        setPartsByMessage(new Map());
+        setTodos([]);
+        setPendingPermissions([]);
+        setSessionStatus('idle');
+        disconnectSSE();
+      }
+
       // Select session
       async function selectSession(id) {
+        if (!id) {
+          clearSessionView();
+          return;
+        }
+
         setActiveSessionId(id);
         setMessages(new Map());
         setParts(new Map());
@@ -277,11 +307,66 @@
             method: 'POST',
             body: JSON.stringify({ worktree: worktree, title: title || 'New Session' }),
           });
-          setSessions(prev => [session, ...prev]);
+          setSessions(prev => sortSessionsByUpdated([session, ...prev]));
           setShowNewSessionForm(false);
           selectSession(session.id);
         } catch (e) {
           alert('Failed to create session: ' + e.message);
+        }
+      }
+
+      async function renameSession(sessionId, title) {
+        const normalizedTitle = (title || '').trim();
+        if (!normalizedTitle) {
+          alert('Title cannot be empty.');
+          return false;
+        }
+
+        setSessionAction(prev => ({ ...prev, renamingId: sessionId }));
+        try {
+          const updated = await api('/sessions/' + sessionId, {
+            method: 'PATCH',
+            body: JSON.stringify({ title: normalizedTitle }),
+          });
+          setSessions(prev => {
+            const merged = prev.map(s => (s.id === sessionId ? updated : s));
+            return sortSessionsByUpdated(merged);
+          });
+          return true;
+        } catch (e) {
+          alert('Failed to rename session: ' + e.message);
+          return false;
+        } finally {
+          setSessionAction(prev => ({ ...prev, renamingId: null }));
+        }
+      }
+
+      async function deleteSession(sessionId) {
+        const target = sessions.find(s => s.id === sessionId);
+        if (!target) return;
+
+        const ok = window.confirm(
+          'Delete session "' + target.title + '"? This will remove all related messages and todos.'
+        );
+        if (!ok) return;
+
+        setSessionAction(prev => ({ ...prev, deletingId: sessionId }));
+        try {
+          await api('/sessions/' + sessionId, { method: 'DELETE' });
+          const remaining = sessions.filter(s => s.id !== sessionId);
+          setSessions(remaining);
+
+          if (activeSessionId === sessionId) {
+            if (remaining.length > 0) {
+              await selectSession(remaining[0].id);
+            } else {
+              clearSessionView();
+            }
+          }
+        } catch (e) {
+          alert('Failed to delete session: ' + e.message);
+        } finally {
+          setSessionAction(prev => ({ ...prev, deletingId: null }));
         }
       }
 
@@ -406,9 +491,13 @@
             activeId=${activeSessionId}
             onSelect=${selectSession}
             onCreate=${createSession}
+            onRename=${renameSession}
+            onDelete=${deleteSession}
             showForm=${showNewSessionForm}
             onToggleForm=${() => setShowNewSessionForm(!showNewSessionForm)}
             defaultWorktree=${defaultWorktree}
+            renamingId=${sessionAction.renamingId}
+            deletingId=${sessionAction.deletingId}
           />
           <${MainContent}
             sessionId=${activeSessionId}
@@ -481,15 +570,36 @@
     }
 
     // ============ Sidebar ============
-    function Sidebar({ sessions, activeId, onSelect, onCreate, showForm, onToggleForm, defaultWorktree }) {
+    function Sidebar({
+      sessions,
+      activeId,
+      onSelect,
+      onCreate,
+      onRename,
+      onDelete,
+      showForm,
+      onToggleForm,
+      defaultWorktree,
+      renamingId,
+      deletingId,
+    }) {
       const [worktree, setWorktree] = useState(defaultWorktree || '');
       const [title, setTitle] = useState('');
+      const [editingSessionId, setEditingSessionId] = useState(null);
+      const [editingTitle, setEditingTitle] = useState('');
 
       useEffect(() => {
         if (defaultWorktree && !worktree) {
           setWorktree(defaultWorktree);
         }
       }, [defaultWorktree]);
+
+      useEffect(() => {
+        if (editingSessionId && !sessions.some(s => s.id === editingSessionId)) {
+          setEditingSessionId(null);
+          setEditingTitle('');
+        }
+      }, [sessions, editingSessionId]);
 
       function handleCreate(e) {
         e.preventDefault();
@@ -498,6 +608,35 @@
           setWorktree(defaultWorktree || '');
           setTitle('');
         }
+      }
+
+      function startRename(e, session) {
+        e.stopPropagation();
+        setEditingSessionId(session.id);
+        setEditingTitle(session.title);
+      }
+
+      function cancelRename(e) {
+        if (e) e.stopPropagation();
+        setEditingSessionId(null);
+        setEditingTitle('');
+      }
+
+      async function submitRename(e, sessionId) {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        const ok = await onRename(sessionId, editingTitle);
+        if (ok) {
+          setEditingSessionId(null);
+          setEditingTitle('');
+        }
+      }
+
+      function requestDelete(e, sessionId) {
+        e.stopPropagation();
+        onDelete(sessionId);
       }
 
       return html`
@@ -546,19 +685,89 @@
                   <div class="session-empty-text">No sessions yet</div>
                 </div>
               `}
-              ${sessions.map(s => html`
-                <div
-                  key=${s.id}
-                  class="session-item ${s.id === activeId ? 'active' : ''}"
-                  onClick=${() => onSelect(s.id)}
-                >
-                  <div class="session-item-indicator"></div>
-                  <div class="session-item-content">
-                    <div class="session-item-title">${s.title}</div>
-                    <div class="session-item-meta">${formatRelative(s.updated_at)}</div>
+              ${sessions.map(s => {
+                const isEditing = editingSessionId === s.id;
+                return html`
+                  <div
+                    key=${s.id}
+                    class="session-item ${s.id === activeId ? 'active' : ''}"
+                    onClick=${() => {
+                      if (!isEditing) onSelect(s.id);
+                    }}
+                  >
+                    <div class="session-item-indicator"></div>
+                    <div class="session-item-content">
+                      ${isEditing ? html`
+                        <form
+                          class="session-rename-form"
+                          onSubmit=${(e) => submitRename(e, s.id)}
+                          onClick=${(e) => e.stopPropagation()}
+                        >
+                          <input
+                            class="input session-rename-input"
+                            type="text"
+                            value=${editingTitle}
+                            onInput=${(e) => setEditingTitle(e.target.value)}
+                            onKeyDown=${(e) => {
+                              if (e.key === 'Escape') {
+                                cancelRename(e);
+                              }
+                            }}
+                            disabled=${renamingId === s.id}
+                            autoFocus
+                          />
+                          <div class="session-rename-actions">
+                            <button
+                              type="submit"
+                              class="session-action-btn"
+                              title="Save"
+                              aria-label="Save session title"
+                              disabled=${renamingId === s.id || !editingTitle.trim()}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              type="button"
+                              class="session-action-btn"
+                              title="Cancel"
+                              aria-label="Cancel session rename"
+                              onClick=${cancelRename}
+                              disabled=${renamingId === s.id}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </form>
+                      ` : html`
+                        <div class="session-item-title">${s.title}</div>
+                        <div class="session-item-meta">${formatRelative(s.updated_at)}</div>
+                      `}
+                    </div>
+                    ${!isEditing && html`
+                      <div class="session-item-actions" onClick=${(e) => e.stopPropagation()}>
+                        <button
+                          class="session-action-btn"
+                          title="Rename"
+                          aria-label="Rename session"
+                          onClick=${(e) => startRename(e, s)}
+                          disabled=${deletingId === s.id}
+                        >
+                          ✎
+                        </button>
+                        <button
+                          class="session-action-btn danger"
+                          title="Delete"
+                          aria-label="Delete session"
+                          onClick=${(e) => requestDelete(e, s.id)}
+                          disabled=${deletingId === s.id || renamingId === s.id}
+                        >
+                          ${deletingId === s.id ? '…' : '🗑'}
+                        </button>
+                      </div>
+                    `}
                   </div>
-                </div>
-              `)}
+                `;
+              })}
             </div>
           </div>
         </aside>
@@ -1010,7 +1219,7 @@
             <div class="logs-filter-row">
               <label class="logs-filter-label">Date</label>
               <select
-                class="input logs-filter-input"
+                class="input logs-filter-input logs-select"
                 value=${selectedDate}
                 onChange=${(e) => onSelectedDateChange(e.target.value)}
               >
@@ -1023,7 +1232,7 @@
             <div class="logs-filter-row">
               <label class="logs-filter-label">Level</label>
               <select
-                class="input logs-filter-input"
+                class="input logs-filter-input logs-select"
                 value=${filters.level}
                 onChange=${(e) => onFilterChange('level', e.target.value)}
               >
@@ -1095,7 +1304,7 @@
                     <span class="log-time">${formatDateTime(item.ts)}</span>
                     <span class="log-level ${levelClass(item.level)}">${item.level || '-'}</span>
                     <span class="log-event">${item.event || '-'}</span>
-                    <span class="log-message">${item.message || ''}</span>
+                    <span class="log-message-line">${item.message || ''}</span>
                   </button>
                   <div class="log-meta">
                     <span>line ${item.line_no}</span>
