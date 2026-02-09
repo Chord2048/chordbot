@@ -87,7 +87,6 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
 - `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板）
-- `docs/project.md`：本项目当前架构/数据流/API/事件结构（强烈建议先看）
 - `CHANGES.md`：版本间改动点与决策背景
 
 ## 6. 开发约定（写代码前先对齐）
@@ -104,7 +103,6 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - 文档必须简洁、专业、可维护；避免“长篇大论”和重复叙述。
 - 若无明确要求，**不要随意新增文档/新增大段说明**；优先在既有文档里补充最小必要信息。
 - 任何对行为/协议/接口有影响的改动完成后，必须自查是否需要同步更新：
-  - `docs/` 下相关文档（尤其 `docs/project.md`）
   - `Agent.md`（确保新来的 Agent 依然能 5 分钟上手）
 
 **代码风格**

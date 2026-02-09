@@ -52,4 +52,5 @@ Note: Uvicorn access logs are not included in the JSONL log file. If you want to
 ## Notes
 - Do not commit `.env` (contains secrets).
 - This project uses an OpenAI-compatible Chat Completions endpoint via env vars (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`).
+- Set `TAVILY_API_KEY` to enable the `websearch` tool (Tavily-based web search).
 - For fast local testing you can set `CHORDCODE_DEFAULT_PERMISSION_ACTION=allow` to bypass permission prompts (recommended to keep `ask` by default).

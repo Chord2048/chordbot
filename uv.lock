@@ -140,6 +140,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langfuse" },
     { name = "loguru" },
     { name = "openai" },
@@ -152,7 +153,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -161,6 +161,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "fastapi", specifier = ">=0.110" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "langfuse", specifier = ">=3.0" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "openai", specifier = ">=1.40" },
@@ -173,7 +174,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
 ]

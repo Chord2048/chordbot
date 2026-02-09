@@ -222,6 +222,36 @@ def log_context(**kwargs: object):
             var.reset(tok)
 
 
+def log_event(
+    message: str,
+    *,
+    level: str = "info",
+    event: str | None = None,
+    exception: BaseException | None = None,
+    **fields: object,
+) -> None:
+    """
+    Emit a structured log with context keys routed via `log_context`
+    and non-context keys stored under `extra`.
+    """
+    ctx: dict[str, object] = {}
+    extra: dict[str, object] = {}
+    for k, v in fields.items():
+        if k in _CTX_VARS:
+            ctx[k] = v
+        else:
+            extra[k] = v
+    if event is not None:
+        ctx["event"] = event
+
+    with log_context(**ctx):
+        logger = _logger.bind(**extra) if extra else _logger
+        if exception is not None:
+            logger = logger.opt(exception=exception)
+        method = getattr(logger, level.lower())
+        method(message)
+
+
 log = _logger
 
 # Keep library output quiet by default; enable after init_logging() so callers

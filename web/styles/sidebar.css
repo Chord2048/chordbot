@@ -52,6 +52,52 @@
   min-width: 0;
 }
 
+.session-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.session-item:hover .session-item-actions,
+.session-item.active .session-item-actions {
+  opacity: 1;
+}
+
+.session-action-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.session-action-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.session-action-btn.danger {
+  color: #ff8794;
+}
+
+.session-action-btn.danger:hover:not(:disabled) {
+  color: #ffd4da;
+  border-color: rgba(255, 91, 110, 0.5);
+  background: rgba(255, 91, 110, 0.15);
+}
+
+.session-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .session-item-title {
   font-size: 13px;
   font-weight: 500;
@@ -68,6 +114,24 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-rename-input {
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.session-rename-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* New Session Button */

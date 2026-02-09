@@ -12,7 +12,8 @@ from chordcode.bus.bus import Bus, Event
 from chordcode.config import Config
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker
-from chordcode.llm.openai_chat import Finish, OpenAIChatProvider, ReasoningDelta, TextDelta, ToolCall
+from chordcode.llm.openai_chat import Error as LLMError
+from chordcode.llm.openai_chat import Finish, OpenAIChatProvider, TextDelta, ToolCall, ReasoningDelta
 from chordcode.loop.interrupt import InterruptManager
 from chordcode.model import (
     Message,
@@ -28,9 +29,10 @@ from chordcode.model import (
 )
 from chordcode.observability.langfuse_client import get_langfuse
 from chordcode.permission.service import PermissionRejected, PermissionService
+from chordcode.prompts.template import render_prompt
 from chordcode.store.sqlite import SQLiteStore
 from chordcode.tools.registry import ToolRegistry
-from chordcode.log import log, log_context
+from chordcode.log import log, log_context, log_event
 
 
 @dataclass(frozen=True)
@@ -127,10 +129,15 @@ class SessionLoop:
                 ) as trace_span:
                     trace_id = trace_span.trace_id
                     with log_context(trace_id=trace_id):
-                        log.bind(event="langfuse.trace.start").debug("Langfuse trace started")
+                        log_event("Langfuse trace started", level="debug", event="langfuse.trace.start")
                     return await self._run_session_with_trace(session_id, trace_span, trace_id)
             except Exception as e:
-                log.bind(event="langfuse.trace.start.error").opt(exception=e).error("Error creating Langfuse trace span")
+                log_event(
+                    "Error creating Langfuse trace span",
+                    level="error",
+                    event="langfuse.trace.start.error",
+                    exception=e,
+                )
                 # Fall back to running without Langfuse
                 return await self._run_session_with_trace(session_id, None, None)
         else:
@@ -149,7 +156,12 @@ class SessionLoop:
                 agent="primary",
                 event="session.start",
             ):
-                log.bind(worktree=session.worktree, cwd=session.cwd, model=self._cfg.openai.model).info("Session started")
+                log_event(
+                    "Session started",
+                    worktree=session.worktree,
+                    cwd=session.cwd,
+                    model=self._cfg.openai.model,
+                )
             
             # Update trace with session metadata
             if trace_span:
@@ -163,7 +175,12 @@ class SessionLoop:
                         }
                     )
                 except Exception as e:
-                    log.bind(event="langfuse.trace.update.error").opt(exception=e).error("Error updating Langfuse trace metadata")
+                    log_event(
+                        "Error updating Langfuse trace metadata",
+                        level="error",
+                        event="langfuse.trace.update.error",
+                        exception=e,
+                    )
             
             await self._bus.publish(Event(type="session.status", properties={"session_id": session_id, "status": "busy"}))
 
@@ -183,11 +200,21 @@ class SessionLoop:
                         }
                     )
                 except Exception as err:
-                    log.bind(event="langfuse.trace.error_update.error").opt(exception=err).error(
+                    log_event(
                         "Error updating Langfuse trace with error metadata",
+                        level="error",
+                        event="langfuse.trace.error_update.error",
+                        exception=err,
                     )
             
-            log.bind(event="session.error", session_id=session_id, trace_id=trace_id).opt(exception=e).error("Session failed early")
+            log_event(
+                "Session failed early",
+                level="error",
+                event="session.error",
+                exception=e,
+                session_id=session_id,
+                trace_id=trace_id,
+            )
             await self._bus.publish(
                 Event(
                     type="session.error",
@@ -227,12 +254,30 @@ class SessionLoop:
         ]
 
         messages = self._to_openai_messages(history)
+        turn_index = 0
 
         while True:
+            turn_index += 1
+            with log_context(
+                session_id=session_id,
+                message_id=assistant_id,
+                trace_id=trace_id,
+                agent=agent,
+                event="session.turn.start",
+            ):
+                log_event("Session turn started", level="debug", turn=turn_index, history_messages=len(messages))
             # Check for interruption
             if await self._interrupt.is_interrupted(session_id):
                 signal = await self._interrupt.check(session_id)
                 reason = signal.reason if signal else "interrupted"
+                log_event(
+                    "Session interrupted",
+                    event="session.interrupted",
+                    session_id=session_id,
+                    message_id=assistant_id,
+                    trace_id=trace_id,
+                    finish_reason=reason,
+                )
                 await self._store.update_message(assistant_id, completed_at=int(time.time() * 1000), finish=reason)
                 await self._bus.publish(
                     Event(
@@ -251,7 +296,16 @@ class SessionLoop:
             current_reasoning_part: ReasoningPart | None = None
 
             try:
-                system = self._cfg.system_prompt
+                system = render_prompt(
+                    self._cfg.system_prompt,
+                    session_context={
+                        "session_id": session_id,
+                        "cwd": session.cwd,
+                        "worktree": session.worktree,
+                        "model": self._cfg.openai.model,
+                        "agent": agent,
+                    },
+                )
                 if self._hooks:
                     sysout: dict[str, object] = {"system": [system]}
                     await self._hooks.trigger(
@@ -326,15 +380,18 @@ class SessionLoop:
                     agent=agent,
                     event="llm.request",
                 ):
-                    log.bind(
+                    log_event(
+                        "LLM request",
+                        level="debug",
                         system_chars=system_chars,
                         messages_count=messages_count,
                         messages_chars=messages_chars,
                         tools_count=tools_count,
                         temperature=llm_temperature,
                         top_p=llm_top_p,
-                    ).debug("LLM request")
+                    )
 
+                interrupted_during_stream = False
                 async for evt in self._llm.stream(
                     system=system, 
                     messages=msgs, 
@@ -346,6 +403,7 @@ class SessionLoop:
                 ):
                     # Check interruption during streaming
                     if await self._interrupt.is_interrupted(session_id):
+                        interrupted_during_stream = True
                         break
                     if isinstance(evt, TextDelta):
                         assistant_chars += len(evt.text)
@@ -401,8 +459,29 @@ class SessionLoop:
                         continue
 
                     if isinstance(evt, ToolCall):
+                        with log_context(
+                            session_id=session_id,
+                            message_id=assistant_id,
+                            trace_id=trace_id,
+                            agent=agent,
+                            tool_name=evt.name,
+                            tool_call_id=evt.call_id,
+                            event="llm.tool_call.received",
+                        ):
+                            log_event("LLM emitted tool call", level="debug", args_json_chars=len(evt.args_json or ""))
                         calls.append(evt)
                         continue
+
+                    if isinstance(evt, LLMError):
+                        with log_context(
+                            session_id=session_id,
+                            message_id=assistant_id,
+                            trace_id=trace_id,
+                            agent=agent,
+                            event="llm.response.error",
+                        ):
+                            log_event("LLM returned error event", level="error", error_message=evt.message)
+                        raise RuntimeError(f"LLM provider error: {evt.message}")
 
                     if isinstance(evt, Finish):
                         reason = evt.reason
@@ -428,11 +507,26 @@ class SessionLoop:
                             agent=agent,
                             event="llm.finish",
                         ):
-                            log.bind(finish_reason=reason, assistant_chars=assistant_chars).debug("LLM finished")
+                            log_event("LLM finished", level="debug", finish_reason=reason, assistant_chars=assistant_chars)
                         continue
+                if interrupted_during_stream:
+                    log_event(
+                        "LLM stream interrupted by user signal",
+                        event="llm.stream.interrupted",
+                        session_id=session_id,
+                        message_id=assistant_id,
+                        trace_id=trace_id,
+                        turn=turn_index,
+                    )
             except Exception as e:
-                log.bind(event="llm.stream.error", session_id=session_id, message_id=assistant_id, trace_id=trace_id).opt(exception=e).error(
+                log_event(
                     "LLM streaming error",
+                    level="error",
+                    event="llm.stream.error",
+                    exception=e,
+                    session_id=session_id,
+                    message_id=assistant_id,
+                    trace_id=trace_id,
                 )
                 # Handle streaming errors
                 await self._store.update_message(
@@ -454,11 +548,29 @@ class SessionLoop:
                 return assistant_id, trace_id
 
             if calls:
+                with log_context(
+                    session_id=session_id,
+                    message_id=assistant_id,
+                    trace_id=trace_id,
+                    agent=agent,
+                    event="llm.tool_calls.batch",
+                ):
+                    log_event("Processing tool calls", level="debug", tool_calls_count=len(calls), finish_reason=reason)
                 for c in calls:
                     call_id = c.call_id
                     tool_name = c.name
                     raw = c.args_json
 
+                    with log_context(
+                        session_id=session_id,
+                        message_id=assistant_id,
+                        trace_id=trace_id,
+                        agent=agent,
+                        tool_name=tool_name,
+                        tool_call_id=call_id,
+                        event="tool.queued",
+                    ):
+                        log_event("Tool call queued", level="debug", args_json_chars=len(raw or ""))
                     part_id = str(uuid4())
                     pending = ToolPart(
                         id=part_id,
@@ -479,6 +591,20 @@ class SessionLoop:
                     try:
                         args = json.loads(raw or "{}")
                     except Exception as e:
+                        raw_preview = (raw or "")[:200]
+                        log_event(
+                            "Failed to parse tool arguments",
+                            level="error",
+                            event="tool.args.parse.error",
+                            exception=e,
+                            session_id=session_id,
+                            message_id=assistant_id,
+                            trace_id=trace_id,
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                            args_json_chars=len(raw or ""),
+                            args_json_preview=raw_preview,
+                        )
                         done = ToolPart(
                             id=part_id,
                             message_id=assistant_id,
@@ -552,7 +678,7 @@ class SessionLoop:
                             safe_args["string_value_chars"] = {
                                 k: len(v) for k, v in args.items() if isinstance(k, str) and isinstance(v, str)
                             }
-                        log.bind(**safe_args).debug("Tool execution started")
+                        log_event("Tool execution started", level="debug", **safe_args)
                     running = ToolPart(
                         id=part_id,
                         message_id=assistant_id,
@@ -563,7 +689,67 @@ class SessionLoop:
                     )
                     await self._store.add_part(session_id, assistant_id, running)
 
-                    t = self._tools.get(tool_name)
+                    try:
+                        t = self._tools.get(tool_name)
+                    except Exception as e:
+                        log_event(
+                            "Tool lookup failed",
+                            level="error",
+                            event="tool.lookup.error",
+                            exception=e,
+                            session_id=session_id,
+                            message_id=assistant_id,
+                            trace_id=trace_id,
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                        )
+                        done = ToolPart(
+                            id=part_id,
+                            message_id=assistant_id,
+                            session_id=session_id,
+                            call_id=call_id,
+                            tool=tool_name,
+                            state=ToolStateCompleted(
+                                input=args,
+                                title=tool_name,
+                                output=f"Tool not found: {tool_name}",
+                                metadata={"error": True},
+                                time={"start": start, "end": int(time.time() * 1000)},
+                            ),
+                        )
+                        await self._store.add_part(session_id, assistant_id, done)
+                        await self._bus.publish(
+                            Event(
+                                type="message.part.updated",
+                                properties={"session_id": session_id, "message_id": assistant_id, "part": done.model_dump()},
+                            ),
+                        )
+
+                        tool_msg_id = str(uuid4())
+                        tool_msg = Message(
+                            id=tool_msg_id,
+                            session_id=session_id,
+                            role="tool",
+                            parent_id=assistant_id,
+                            agent=agent,
+                            model=model,
+                            created_at=int(time.time() * 1000),
+                            tool_call_id=call_id,
+                            tool_name=tool_name,
+                        )
+                        await self._store.add_message(tool_msg)
+                        tool_text_part = TextPart(
+                            id=str(uuid4()),
+                            message_id=tool_msg_id,
+                            session_id=session_id,
+                            text=done.state.output,
+                            synthetic=True,
+                        )
+                        await self._store.add_part(session_id, tool_msg_id, tool_text_part)
+                        await self._bus.publish(
+                            Event(type="message.updated", properties={"session_id": session_id, "info": tool_msg.model_dump()}),
+                        )
+                        continue
                     ctx = ToolCtx(
                         session_id=session_id,
                         message_id=assistant_id,
@@ -588,8 +774,13 @@ class SessionLoop:
                                 },
                             )
                         except Exception as e:
-                            log.bind(event="langfuse.tool_span.start.error", tool_name=tool_name, tool_call_id=call_id).opt(exception=e).error(
+                            log_event(
                                 "Error creating Langfuse tool span",
+                                level="error",
+                                event="langfuse.tool_span.start.error",
+                                exception=e,
+                                tool_name=tool_name,
+                                tool_call_id=call_id,
                             )
                             tool_span_cm = nullcontext(None)
                     else:
@@ -607,8 +798,13 @@ class SessionLoop:
                                         metadata={**r.metadata, "title": r.title},
                                     )
                                 except Exception as e:
-                                    log.bind(event="langfuse.tool_span.update.error", tool_name=tool_name, tool_call_id=call_id).opt(exception=e).error(
+                                    log_event(
                                         "Error updating Langfuse tool span",
+                                        level="error",
+                                        event="langfuse.tool_span.update.error",
+                                        exception=e,
+                                        tool_name=tool_name,
+                                        tool_call_id=call_id,
                                     )
 
                             out: dict[str, object] = {"title": r.title, "output": r.output, "metadata": r.metadata}
@@ -648,7 +844,7 @@ class SessionLoop:
                                 event="tool.finish",
                                 duration_ms=float(end - start),
                             ):
-                                log.bind(output_chars=len(tool_output)).debug("Tool execution finished")
+                                log_event("Tool execution finished", level="debug", output_chars=len(tool_output))
                         except PermissionRejected as e:
                             # Update tool span with error
                             if tool_span:
@@ -661,12 +857,24 @@ class SessionLoop:
                                         },
                                     )
                                 except Exception as err:
-                                    log.bind(event="langfuse.tool_span.error_update.error", tool_name=tool_name, tool_call_id=call_id).opt(exception=err).error(
+                                    log_event(
                                         "Error updating Langfuse tool span with PermissionRejected",
+                                        level="error",
+                                        event="langfuse.tool_span.error_update.error",
+                                        exception=err,
+                                        tool_name=tool_name,
+                                        tool_call_id=call_id,
                                     )
 
-                            log.bind(event="tool.blocked", tool_name=tool_name, tool_call_id=call_id, session_id=session_id, message_id=assistant_id, trace_id=trace_id).warning(
+                            log_event(
                                 "Tool blocked by permission",
+                                level="warning",
+                                event="tool.blocked",
+                                tool_name=tool_name,
+                                tool_call_id=call_id,
+                                session_id=session_id,
+                                message_id=assistant_id,
+                                trace_id=trace_id,
                             )
                             await self._store.update_message(assistant_id, completed_at=int(time.time() * 1000), finish="blocked")
                             await self._bus.publish(
@@ -689,8 +897,13 @@ class SessionLoop:
                                         },
                                     )
                                 except Exception as err:
-                                    log.bind(event="langfuse.tool_span.error_update.error", tool_name=tool_name, tool_call_id=call_id).opt(exception=err).error(
+                                    log_event(
                                         "Error updating Langfuse tool span with error",
+                                        level="error",
+                                        event="langfuse.tool_span.error_update.error",
+                                        exception=err,
+                                        tool_name=tool_name,
+                                        tool_call_id=call_id,
                                     )
                             output = f"Tool execution failed: {e}"
                             out: dict[str, object] = {"title": tool_name, "output": output, "metadata": {"error": True}}
@@ -730,7 +943,7 @@ class SessionLoop:
                                 event="tool.error",
                                 duration_ms=float(end - start),
                             ):
-                                log.bind(output_chars=len(tool_output)).opt(exception=e).error("Tool execution failed")
+                                log_event("Tool execution failed", level="error", exception=e, output_chars=len(tool_output))
 
                     await self._store.add_part(session_id, assistant_id, done)
                     await self._bus.publish(
@@ -765,9 +978,28 @@ class SessionLoop:
 
                 history = await self._store.list_messages(session_id)
                 messages = self._to_openai_messages(history)
+                log_event(
+                    "Session turn continuing after tool execution",
+                    level="debug",
+                    event="session.turn.next",
+                    session_id=session_id,
+                    message_id=assistant_id,
+                    trace_id=trace_id,
+                    turn=turn_index,
+                    history_messages=len(messages),
+                )
                 continue
 
             if reason and reason != "tool_calls":
+                log_event(
+                    "Session finished",
+                    event="session.finish",
+                    session_id=session_id,
+                    message_id=assistant_id,
+                    trace_id=trace_id,
+                    finish_reason=reason,
+                    turn=turn_index,
+                )
                 await self._store.update_message(assistant_id, completed_at=int(time.time() * 1000), finish=reason)
                 await self._bus.publish(
                     Event(

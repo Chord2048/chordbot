@@ -31,6 +31,7 @@ from chordcode.tools.files import FileCtx, ReadTool, WriteTool
 from chordcode.tools.skill import SkillCtx, SkillTool
 from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
+from chordcode.tools.web import TavilySearchTool, WebFetchTool
 
 from dotenv import load_dotenv
 load_dotenv(".env", override=True)
@@ -352,6 +353,8 @@ async def run_session(session_id: str):
             BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
             ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
             WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+            TavilySearchTool(),
+            WebFetchTool(),
             SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
             TodoWriteTool(store=store, bus=bus),
         ],
