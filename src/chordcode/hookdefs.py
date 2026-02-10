@@ -22,6 +22,9 @@ class Hook(StrEnum):
     ToolExecuteBefore = "tool.execute.before"
     ToolExecuteAfter = "tool.execute.after"
 
+    McpServerConnect = "mcp.server.connect"
+    McpToolCall = "mcp.tool.call"
+
     ExperimentalChatSystemTransform = "experimental.chat.system.transform"
     ExperimentalChatMessagesTransform = "experimental.chat.messages.transform"
 
@@ -35,6 +38,8 @@ ALL_HOOKS: tuple[Hook, ...] = (
     Hook.PermissionAsk,
     Hook.ToolExecuteBefore,
     Hook.ToolExecuteAfter,
+    Hook.McpServerConnect,
+    Hook.McpToolCall,
     Hook.ExperimentalChatSystemTransform,
     Hook.ExperimentalChatMessagesTransform,
 )
@@ -119,6 +124,26 @@ class ToolExecuteAfterOutput(TypedDict):
     title: str
     output: str
     metadata: dict[str, Any]
+
+
+class McpServerConnectInput(TypedDict):
+    server: str
+    type: str
+    transport: str
+
+
+class McpServerConnectOutput(TypedDict):
+    pass
+
+
+class McpToolCallInput(TypedDict):
+    server: str
+    tool: str
+    args: dict[str, Any]
+
+
+class McpToolCallOutput(TypedDict):
+    pass
 
 
 class ExperimentalChatSystemTransformInput(TypedDict):

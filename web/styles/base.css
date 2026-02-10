@@ -25,7 +25,7 @@
   /* Chat Bubbles */
   --user-bubble: rgba(91, 156, 255, 0.08);
   --user-border: rgba(91, 156, 255, 0.25);
-  --assistant-bubble: rgba(220, 124, 246, 0.08);
+  --assistant-bubble: rgba(79, 64, 122, 0.08);
   --assistant-border: rgba(180, 115, 255, 0.25);
 
   /* Tool States */
@@ -35,6 +35,7 @@
   --tool-error: #ff5b6e;
 
   /* Layout */
+  --activity-bar-width: 48px;
   --sidebar-width: 260px;
   --sidebar-collapsed: 0px;
   --observability-width: 320px;

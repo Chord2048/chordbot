@@ -27,6 +27,7 @@ src/chordcode/permission/__init__.py
 src/chordcode/permission/rules.py
 src/chordcode/permission/service.py
 src/chordcode/prompts/__init__.py
+src/chordcode/prompts/template.py
 src/chordcode/skills/__init__.py
 src/chordcode/skills/loader.py
 src/chordcode/store/__init__.py
@@ -46,6 +47,7 @@ tests/test_hooks.py
 tests/test_log_view_api.py
 tests/test_logging.py
 tests/test_permission_service.py
+tests/test_prompt_template.py
 tests/test_reasoning_content.py
 tests/test_session_management_api.py
 tests/test_skill_tool.py

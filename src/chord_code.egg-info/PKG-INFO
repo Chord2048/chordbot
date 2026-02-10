@@ -15,6 +15,7 @@ Requires-Dist: tree-sitter-bash>=0.21
 Requires-Dist: python-dotenv>=1.0
 Requires-Dist: langfuse>=3.0
 Requires-Dist: httpx>=0.27
+Requires-Dist: mcp>=1.0
 
 # Chord Code (Agent Core, MVP)
 
@@ -54,6 +55,19 @@ This project uses `loguru` and writes:
 - Console: human-friendly, colored logs
 - File: JSONL (one JSON object per line), rotated daily and retained for 7 days by default
 
+Recommended usage in code:
+```python
+from chordcode.log import logger
+
+logger.info("Session started", event="session.start", session_id="s1")
+logger.error("Tool failed", event="tool.error", tool_name="bash", exc_info=err)
+
+with logger.context(session_id="s1", message_id="m1", event="session.turn"):
+    logger.debug("Running turn", turn=2)
+```
+
+The old `log.bind(...)`, `log_context(...)`, and `log_event(...)` APIs have been removed.
+
 Env vars (all optional):
 - `CHORDCODE_LOG_LEVEL` (default: `INFO`)
 - `CHORDCODE_LOG_CONSOLE` (default: `true`)
@@ -70,4 +84,5 @@ Note: Uvicorn access logs are not included in the JSONL log file. If you want to
 ## Notes
 - Do not commit `.env` (contains secrets).
 - This project uses an OpenAI-compatible Chat Completions endpoint via env vars (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`).
+- Set `TAVILY_API_KEY` to enable the `websearch` tool (Tavily-based web search).
 - For fast local testing you can set `CHORDCODE_DEFAULT_PERMISSION_ACTION=allow` to bypass permission prompts (recommended to keep `ask` by default).

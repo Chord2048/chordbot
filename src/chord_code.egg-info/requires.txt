@@ -9,3 +9,4 @@ tree-sitter-bash>=0.21
 python-dotenv>=1.0
 langfuse>=3.0
 httpx>=0.27
+mcp>=1.0

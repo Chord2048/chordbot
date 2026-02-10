@@ -1,22 +1,14 @@
-/* Layout - 3 Column Grid */
+/* Layout - 4 Column Grid (ActivityBar + SidePanel + Main + Observability) */
 .app-layout {
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr var(--observability-width);
+  grid-template-columns: var(--activity-bar-width) var(--sidebar-width) 1fr var(--observability-width);
   grid-template-rows: var(--header-height) 1fr;
   height: 100%;
-  transition: grid-template-columns var(--transition-normal);
-}
-
-.app-layout.sidebar-collapsed {
-  grid-template-columns: var(--sidebar-collapsed) 1fr var(--observability-width);
+  position: relative;
 }
 
 .app-layout.observability-collapsed {
-  grid-template-columns: var(--sidebar-width) 1fr var(--observability-collapsed);
-}
-
-.app-layout.sidebar-collapsed.observability-collapsed {
-  grid-template-columns: var(--sidebar-collapsed) 1fr var(--observability-collapsed);
+  grid-template-columns: var(--activity-bar-width) var(--sidebar-width) 1fr var(--observability-collapsed);
 }
 
 /* Header */
@@ -139,7 +131,87 @@
   background: var(--panel);
   border-right: 1px solid var(--border);
   overflow: hidden;
-  transition: width var(--transition-normal);
+}
+
+/* Resize Handles — positioned absolutely over panel borders */
+.resize-handle {
+  position: absolute;
+  top: var(--header-height);
+  bottom: 0;
+  width: 5px;
+  margin-left: -2px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 50;
+  transition: background var(--transition-fast);
+}
+
+.resize-handle:hover,
+.resize-handle.active {
+  background: var(--accent);
+}
+
+/* Prevent text selection and set cursor globally while dragging */
+body.resizing {
+  cursor: col-resize !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+body.resizing * {
+  cursor: col-resize !important;
+  pointer-events: none !important;
+}
+
+body.resizing .resize-handle {
+  pointer-events: auto !important;
+}
+
+/* Activity Bar */
+.activity-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+  gap: 2px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+
+.activity-bar-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.activity-bar-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.activity-bar-btn.active {
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.activity-bar-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
 }
 
 .sidebar-header {
@@ -173,7 +245,6 @@
   background: var(--panel);
   border-left: 1px solid var(--border);
   overflow: hidden;
-  transition: width var(--transition-normal);
 }
 
 .observability-header {
@@ -238,11 +309,12 @@
 
 @media (max-width: 900px) {
   .app-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: var(--activity-bar-width) 1fr;
   }
 
   .sidebar,
-  .observability-panel {
+  .observability-panel,
+  .resize-handle {
     display: none;
   }
 }

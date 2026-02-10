@@ -18,7 +18,7 @@
 - Context compaction / memory / summary
 - 插件自动加载（Plugin loader）与更完整的插件生态
 - 多 Agent（plan/build/explore/compaction 等）与子任务编排
-- MCP / sandbox runtime / 远程执行环境
+- sandbox runtime / 远程执行环境
 
 ## 2. 当前开发进度（以仓库为准）
 
@@ -31,6 +31,7 @@
 - 事件总线（进程内 pub/sub）+ SSE：`src/chordcode/bus/bus.py`、`/events`
 - SQLite 持久化：`src/chordcode/store/sqlite.py`
 - 工具（当前：bash/read/write/skill/todowrite）与 registry：`src/chordcode/tools/*`
+- MCP 客户端（发现配置、管理连接、暴露 MCP 工具给 LLM）：`src/chordcode/mcp/*`
 - Hooks（用于在关键生命周期点做可插拔改写/观测）：`src/chordcode/hooks.py`、`src/chordcode/hookdefs.py`
 - Langfuse（可选）：`docs/langfuse.md`、`src/chordcode/observability/*`
 
@@ -78,15 +79,24 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 **Langfuse（可选）**
 - 见 `docs/langfuse.md`；如果不配置 key，则等价于关闭追踪（代码会降级运行）。
 
+**MCP 服务器配置（可选）**
+- 在以下路径放置 `mcp.json`（后者覆盖前者同名 server）：
+  - 全局：`~/.cursor/mcp.json`、`~/.chordcode/mcp.json`
+  - 项目级：`{worktree}/.cursor/mcp.json`、`{worktree}/.chordcode/mcp.json`
+- 格式：`{ "mcpServers": { "<name>": { "command": "...", "args": [...] } } }`（local）或 `{ "mcpServers": { "<name>": { "url": "..." } } }`（remote）
+- 启动时自动发现并连接；MCP 工具以 `{server}_{tool}` 命名注入 ToolRegistry，权限类别为 `mcp`。
+
 ## 5. 关键代码入口（建议从这里读）
 
 - `src/chordcode/api/app.py`：HTTP API、SSE、web 静态文件挂载、run/interrupt 端点、组装工具上下文
 - `src/chordcode/loop/session_loop.py`：核心编排（LLM 流式、tool_calls、permission gate、落库、发事件、中断）
 - `src/chordcode/model.py`：Message/Part/Permission 等 Pydantic 模型（前后端对齐的“协议层”）
 - `src/chordcode/tools/`：工具实现（bash/read/write/skill/todowrite）+ path 限制/截断 + registry
+- `src/chordcode/mcp/`：MCP 客户端支持（config 加载、server 连接管理、tool adapter）
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
 - `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板）
+- `docs/project.md`：本项目当前架构/数据流/API/事件结构（强烈建议先看）
 - `CHANGES.md`：版本间改动点与决策背景
 
 ## 6. 开发约定（写代码前先对齐）
@@ -153,10 +163,21 @@ uv run python -m unittest discover -s tests -q
 2. 再改 `web/app.js` 的 state 管理与渲染函数
 3. 用浏览器 + SSE Events 面板核对是否符合预期
 
+**MCP 功能说明（已实现）**
+- `MCP 是什么`：Model Context Protocol 客户端支持，允许 Agent 连接外部 MCP 服务器并使用其工具（文件系统、数据库、搜索 API 等）。
+- `配置发现`：启动时扫描全局 + 项目级 `mcp.json`，解析 `mcpServers` 字段。`command` → local/stdio，`url` → remote/streamable-http（可显式指定 `"transport": "sse"`）。
+- `项目里怎么实现`：
+  1. 配置加载：`src/chordcode/mcp/config.py`（`MCPServerConfig` + `load_mcp_configs()`）。
+  2. 连接管理：`src/chordcode/mcp/client.py`（`MCPManager`：并发连接、工具缓存、call_tool、生命周期管理）。
+  3. 工具适配：`src/chordcode/mcp/tool_adapter.py`（`MCPToolAdapter` 实现 `Tool` Protocol，session loop 无需改动）。
+  4. 运行时接线：`src/chordcode/api/app.py` 在 startup 初始化 `MCPManager`，在 `run_session` 注入 MCP 工具到 `ToolRegistry`。
+  5. API 端点：`GET /mcp/status`、`GET /mcp/tools`、`POST /mcp/{name}/connect`、`POST /mcp/{name}/disconnect`、`POST /mcp/servers`。
+  6. 权限控制：`permission="mcp"`，patterns 为 `{server}_{tool}` 命名空间。
+  7. Hook 点：`mcp.server.connect`、`mcp.tool.call`（定义在 `hookdefs.py`）。
+
 ## 9. 推荐参考信息（本仓库内）
 
 **强烈推荐优先阅读**
-- `docs/project.md`
 - `CHANGES.md`
 
 **可选参考**

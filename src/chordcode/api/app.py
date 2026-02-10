@@ -6,6 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -35,6 +36,8 @@ from chordcode.tools.skill import SkillCtx, SkillTool
 from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
 from chordcode.tools.web import TavilySearchTool, WebFetchTool
+from chordcode.mcp import MCPManager, MCPToolAdapter, load_mcp_configs, MCPServerConfig
+from chordcode.skills.loader import SkillLoader
 
 from dotenv import load_dotenv
 load_dotenv(".env", override=True)
@@ -58,6 +61,7 @@ if langfuse_hook:
     hooks.add(langfuse_hook)
 
 perm = PermissionService(bus, store, hooks)
+mcp_manager = MCPManager(bus=bus)
 
 llm = OpenAIChatProvider(
     base_url=cfg.openai.base_url,
@@ -98,6 +102,11 @@ async def _startup():
     await store.init()
     await hooks.trigger(Hook.Config, {"config": cfg}, {})
 
+    # Initialize MCP servers
+    mcp_configs = load_mcp_configs(cfg.default_worktree)
+    if mcp_configs:
+        await mcp_manager.initialize(mcp_configs)
+
     async def forward():
         async for e in bus.subscribe("*"):
             await hooks.trigger(Hook.Event, {"event": e}, {})
@@ -107,7 +116,8 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    """Shutdown handler to flush Langfuse events."""
+    """Shutdown handler to flush Langfuse events and close MCP connections."""
+    await mcp_manager.shutdown()
     shutdown_langfuse()
 
 @app.get("/")
@@ -350,17 +360,21 @@ async def add_message(session_id: str, body: AddMessageRequest):
 @app.post("/sessions/{session_id}/run")
 async def run_session(session_id: str):
     session = await store.get_session(session_id)
-    tools = ToolRegistry(
-        [
-            BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
-            ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-            WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-            TavilySearchTool(),
-            WebFetchTool(),
-            SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
-            TodoWriteTool(store=store, bus=bus),
-        ],
-    )
+    builtin_tools = [
+        BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
+        ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+        WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+        TavilySearchTool(),
+        WebFetchTool(),
+        SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
+        TodoWriteTool(store=store, bus=bus),
+    ]
+
+    # Inject MCP tools alongside built-in tools
+    mcp_tool_infos = await mcp_manager.list_tools()
+    mcp_tools = [MCPToolAdapter(info, mcp_manager) for info in mcp_tool_infos]
+
+    tools = ToolRegistry(builtin_tools + mcp_tools)
     loop = SessionLoop(cfg=cfg, bus=bus, store=store, perm=perm, tools=tools, llm=llm, interrupt=interrupt, hooks=hooks)
     msg_id, trace_id = await loop.run(session_id=session.id)
     result = {"assistant_message_id": msg_id}
@@ -424,3 +438,124 @@ async def events(session_id: str | None = None):
 async def reply_permission(request_id: str, body: PermissionReply):
     await perm.reply(request_id, body)
     return {"ok": True}
+
+
+# -- Skills endpoints --
+
+@app.get("/skills")
+async def list_skills(worktree: str | None = None):
+    wt = (worktree or "").strip() or cfg.default_worktree
+    loader = SkillLoader(worktree=wt, cwd=wt)
+    skills = loader.list_skills()
+    return {
+        "worktree": wt,
+        "skills": [
+            {"name": s.name, "description": s.description, "path": s.path, "dir": s.dir}
+            for s in skills
+        ],
+    }
+
+
+@app.get("/skills/{name}")
+async def get_skill(name: str, worktree: str | None = None):
+    wt = (worktree or "").strip() or cfg.default_worktree
+    loader = SkillLoader(worktree=wt, cwd=wt)
+    skill = loader.get(name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"skill not found: {name}")
+    files = loader.sample_files(name)
+    return {
+        "name": skill.name,
+        "description": skill.description,
+        "path": skill.path,
+        "dir": skill.dir,
+        "body": skill.body,
+        "files": files,
+    }
+
+
+# -- MCP endpoints --
+
+@app.get("/mcp/status")
+async def mcp_status():
+    statuses = mcp_manager.status()
+    return {"servers": [
+        {"name": s.name, "status": s.status, "error": s.error, "tool_count": s.tool_count}
+        for s in statuses
+    ]}
+
+
+@app.get("/mcp/tools")
+async def mcp_tools():
+    tools = await mcp_manager.list_tools()
+    return {"tools": [
+        {
+            "server": t.server_name,
+            "name": t.tool_name,
+            "namespaced_name": t.namespaced_name,
+            "description": t.description,
+        }
+        for t in tools
+    ]}
+
+
+@app.post("/mcp/{name}/connect")
+async def mcp_connect(name: str):
+    try:
+        await mcp_manager.connect(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown MCP server: {name}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/mcp/{name}/disconnect")
+async def mcp_disconnect(name: str):
+    await mcp_manager.disconnect(name)
+    return {"ok": True}
+
+
+@app.post("/mcp/servers")
+async def mcp_add_server(body: dict[str, Any]):
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    config_raw = body.get("config", {})
+    if not isinstance(config_raw, dict):
+        raise HTTPException(status_code=400, detail="config must be a dict")
+
+    # Determine type from config
+    command = config_raw.get("command", "")
+    url = config_raw.get("url", "")
+    if not command and not url:
+        raise HTTPException(status_code=400, detail="config must have 'command' or 'url'")
+
+    if command:
+        cfg_obj = MCPServerConfig(
+            name=name, type="local", command=command,
+            args=list(config_raw.get("args", [])),
+            env=dict(config_raw.get("env", {})),
+            enabled=config_raw.get("enabled", True),
+            timeout=int(config_raw.get("timeout", 30)),
+            source="api",
+            transport="stdio",
+        )
+    else:
+        transport = config_raw.get("transport", "streamable-http")
+        if transport not in ("stdio", "sse", "streamable-http"):
+            transport = "streamable-http"
+        cfg_obj = MCPServerConfig(
+            name=name, type="remote", url=url,
+            headers=dict(config_raw.get("headers", {})),
+            enabled=config_raw.get("enabled", True),
+            timeout=int(config_raw.get("timeout", 30)),
+            source="api",
+            transport=transport,
+        )
+
+    try:
+        await mcp_manager.add_server(name, cfg_obj)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True, "name": name}

@@ -36,6 +36,65 @@
     const { render } = preact;
     const { useState, useEffect, useRef, useMemo, useCallback } = preactHooks;
 
+    // ============ Resize Hook ============
+    // Returns { width, handleProps } for a draggable resize handle.
+    // `side` is 'left' (sidebar, grows rightward) or 'right' (observability, grows leftward).
+    function useResizable(initialWidth, { min = 160, max = 600, side = 'left', storageKey } = {}) {
+      const stored = storageKey && localStorage.getItem(storageKey);
+      const [width, setWidth] = useState(stored ? Number(stored) : initialWidth);
+      const dragging = useRef(false);
+      const startX = useRef(0);
+      const startW = useRef(0);
+      const activeRef = useRef(null);
+
+      useEffect(() => {
+        function onMouseMove(e) {
+          if (!dragging.current) return;
+          const delta = e.clientX - startX.current;
+          const next = side === 'left'
+            ? Math.min(max, Math.max(min, startW.current + delta))
+            : Math.min(max, Math.max(min, startW.current - delta));
+          setWidth(next);
+        }
+        function onMouseUp() {
+          if (!dragging.current) return;
+          dragging.current = false;
+          document.body.classList.remove('resizing');
+          if (activeRef.current) {
+            activeRef.current.classList.remove('active');
+            activeRef.current = null;
+          }
+        }
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        return () => {
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+      }, [min, max, side]);
+
+      // persist to localStorage on change
+      useEffect(() => {
+        if (storageKey) localStorage.setItem(storageKey, String(width));
+      }, [width, storageKey]);
+
+      const handleProps = useMemo(() => ({
+        onMouseDown: (e) => {
+          e.preventDefault();
+          dragging.current = true;
+          startX.current = e.clientX;
+          startW.current = width;
+          document.body.classList.add('resizing');
+          if (e.currentTarget) {
+            e.currentTarget.classList.add('active');
+            activeRef.current = e.currentTarget;
+          }
+        },
+      }), [width]);
+
+      return { width, setWidth, handleProps };
+    }
+
     // ============ API ============
     async function api(url, options = {}) {
       const res = await fetch(url, {
@@ -159,6 +218,23 @@
       const [logFiltersInitialized, setLogFiltersInitialized] = useState(false);
       const [sessionAction, setSessionAction] = useState({ renamingId: null, deletingId: null });
 
+      // Activity bar + side panel state
+      const [activeSidePanel, setActiveSidePanel] = useState('chat');
+
+      // MCP state
+      const [mcpServers, setMcpServers] = useState([]);
+      const [mcpTools, setMcpTools] = useState([]);
+      const [mcpLoading, setMcpLoading] = useState(false);
+      const [mcpError, setMcpError] = useState('');
+
+      // Skills state
+      const [skills, setSkills] = useState([]);
+      const [skillsLoading, setSkillsLoading] = useState(false);
+      const [skillsError, setSkillsError] = useState('');
+
+      // Resizable panels
+      const sidebar = useResizable(260, { min: 180, max: 500, side: 'left', storageKey: 'cc_sidebar_w' });
+      const observability = useResizable(320, { min: 200, max: 600, side: 'right', storageKey: 'cc_obs_w' });
       // Handle SSE events
       const handleSSEEvent = useCallback((event) => {
         const { type, properties } = event;
@@ -476,17 +552,113 @@
         runLogSearch(0, nextFilters);
       }
 
+      // -- MCP data functions --
+      async function refreshMcp() {
+        setMcpLoading(true);
+        setMcpError('');
+        try {
+          const [statusData, toolsData] = await Promise.all([
+            api('/mcp/status'),
+            api('/mcp/tools'),
+          ]);
+          setMcpServers(statusData.servers || []);
+          setMcpTools(toolsData.tools || []);
+        } catch (e) {
+          setMcpError('Failed to load MCP status: ' + e.message);
+        } finally {
+          setMcpLoading(false);
+        }
+      }
+
+      async function mcpConnect(name) {
+        try {
+          await api('/mcp/' + encodeURIComponent(name) + '/connect', { method: 'POST' });
+          await refreshMcp();
+        } catch (e) {
+          alert('Failed to connect MCP server: ' + e.message);
+        }
+      }
+
+      async function mcpDisconnect(name) {
+        try {
+          await api('/mcp/' + encodeURIComponent(name) + '/disconnect', { method: 'POST' });
+          await refreshMcp();
+        } catch (e) {
+          alert('Failed to disconnect MCP server: ' + e.message);
+        }
+      }
+
+      async function mcpAddServer(name, config) {
+        try {
+          await api('/mcp/servers', {
+            method: 'POST',
+            body: JSON.stringify({ name, config }),
+          });
+          await refreshMcp();
+        } catch (e) {
+          alert('Failed to add MCP server: ' + e.message);
+        }
+      }
+
+      // -- Skills data functions --
+      async function refreshSkills() {
+        setSkillsLoading(true);
+        setSkillsError('');
+        try {
+          const data = await api('/skills');
+          setSkills(data.skills || []);
+        } catch (e) {
+          setSkillsError('Failed to load skills: ' + e.message);
+        } finally {
+          setSkillsLoading(false);
+        }
+      }
+
+      async function loadSkillDetail(name) {
+        try {
+          const data = await api('/skills/' + encodeURIComponent(name));
+          return data;
+        } catch (e) {
+          alert('Failed to load skill detail: ' + e.message);
+          return null;
+        }
+      }
+
+      // Lazy-load data when switching side panel
+      function handleSidePanelChange(panel) {
+        setActiveSidePanel(panel);
+        if (panel === 'mcp' && mcpServers.length === 0 && !mcpLoading) {
+          refreshMcp();
+        }
+        if (panel === 'skills' && skills.length === 0 && !skillsLoading) {
+          refreshSkills();
+        }
+      }
+
       const activeSession = sessions.find(s => s.id === activeSessionId);
 
+      // Build dynamic grid-template-columns based on resize state
+      const obsW = observabilityCollapsed ? '48px' : observability.width + 'px';
+      const gridStyle = 'grid-template-columns: 48px ' + sidebar.width + 'px 1fr ' + obsW;
+
+      // Position resize handles at the right edge of their respective panels
+      const sidebarHandleLeft = 48 + sidebar.width;      // activity-bar + sidebar
+      const obsHandleRight = observabilityCollapsed ? null : observability.width;
+
       return html`
-        <div class="app-layout ${observabilityCollapsed ? 'observability-collapsed' : ''}">
+        <div class="app-layout" style=${gridStyle}>
           <${Header}
             session=${activeSession}
             status=${sessionStatus}
             onToggleObservability=${() => setObservabilityCollapsed(!observabilityCollapsed)}
             observabilityCollapsed=${observabilityCollapsed}
           />
-          <${Sidebar}
+          <${ActivityBar}
+            active=${activeSidePanel}
+            onChange=${handleSidePanelChange}
+          />
+          <${SidePanel}
+            activeSidePanel=${activeSidePanel}
             sessions=${sessions}
             activeId=${activeSessionId}
             onSelect=${selectSession}
@@ -498,6 +670,19 @@
             defaultWorktree=${defaultWorktree}
             renamingId=${sessionAction.renamingId}
             deletingId=${sessionAction.deletingId}
+            mcpServers=${mcpServers}
+            mcpTools=${mcpTools}
+            mcpLoading=${mcpLoading}
+            mcpError=${mcpError}
+            onMcpRefresh=${refreshMcp}
+            onMcpConnect=${mcpConnect}
+            onMcpDisconnect=${mcpDisconnect}
+            onMcpAddServer=${mcpAddServer}
+            skills=${skills}
+            skillsLoading=${skillsLoading}
+            skillsError=${skillsError}
+            onSkillsRefresh=${refreshSkills}
+            onLoadSkillDetail=${loadSkillDetail}
           />
           <${MainContent}
             sessionId=${activeSessionId}
@@ -534,6 +719,10 @@
             expandedLogLineNo=${expandedLogLineNo}
             onToggleLogExpand=${(lineNo) => setExpandedLogLineNo(prev => (prev === lineNo ? null : lineNo))}
           />
+          <div class="resize-handle" style=${'left:' + sidebarHandleLeft + 'px'} ...${sidebar.handleProps} />
+          ${obsHandleRight != null && html`
+            <div class="resize-handle" style=${'right:' + obsHandleRight + 'px'} ...${observability.handleProps} />
+          `}
         </div>
       `;
     }
@@ -569,8 +758,83 @@
       `;
     }
 
-    // ============ Sidebar ============
-    function Sidebar({
+    // ============ ActivityBar ============
+    function ActivityBar({ active, onChange }) {
+      const items = [
+        { id: 'chat', icon: '\u{1F4AC}', label: 'Chat' },
+        { id: 'mcp', icon: '\u{1F50C}', label: 'MCP' },
+        { id: 'skills', icon: '\u{1F9E0}', label: 'Skills' },
+      ];
+      return html`
+        <nav class="activity-bar">
+          ${items.map(item => html`
+            <button
+              key=${item.id}
+              class="activity-bar-btn ${active === item.id ? 'active' : ''}"
+              onClick=${() => onChange(item.id)}
+              title=${item.label}
+              aria-label=${item.label}
+            >
+              ${item.icon}
+            </button>
+          `)}
+        </nav>
+      `;
+    }
+
+    // ============ SidePanel (routes between Chat/MCP/Skills) ============
+    function SidePanel({
+      activeSidePanel,
+      sessions, activeId, onSelect, onCreate, onRename, onDelete,
+      showForm, onToggleForm, defaultWorktree, renamingId, deletingId,
+      mcpServers, mcpTools, mcpLoading, mcpError,
+      onMcpRefresh, onMcpConnect, onMcpDisconnect, onMcpAddServer,
+      skills, skillsLoading, skillsError, onSkillsRefresh, onLoadSkillDetail,
+    }) {
+      return html`
+        <aside class="sidebar">
+          ${activeSidePanel === 'chat' && html`
+            <${SessionsList}
+              sessions=${sessions}
+              activeId=${activeId}
+              onSelect=${onSelect}
+              onCreate=${onCreate}
+              onRename=${onRename}
+              onDelete=${onDelete}
+              showForm=${showForm}
+              onToggleForm=${onToggleForm}
+              defaultWorktree=${defaultWorktree}
+              renamingId=${renamingId}
+              deletingId=${deletingId}
+            />
+          `}
+          ${activeSidePanel === 'mcp' && html`
+            <${McpPanel}
+              servers=${mcpServers}
+              tools=${mcpTools}
+              loading=${mcpLoading}
+              error=${mcpError}
+              onRefresh=${onMcpRefresh}
+              onConnect=${onMcpConnect}
+              onDisconnect=${onMcpDisconnect}
+              onAddServer=${onMcpAddServer}
+            />
+          `}
+          ${activeSidePanel === 'skills' && html`
+            <${SkillsPanel}
+              skills=${skills}
+              loading=${skillsLoading}
+              error=${skillsError}
+              onRefresh=${onSkillsRefresh}
+              onLoadDetail=${onLoadSkillDetail}
+            />
+          `}
+        </aside>
+      `;
+    }
+
+    // ============ SessionsList (was Sidebar) ============
+    function SessionsList({
       sessions,
       activeId,
       onSelect,
@@ -640,10 +904,10 @@
       }
 
       return html`
-        <aside class="sidebar">
+        <div class="sidebar-inner" style="display:flex;flex-direction:column;height:100%">
           <div class="sidebar-header">
             <button class="new-session-btn" onClick=${onToggleForm}>
-              ${showForm ? '✕ Cancel' : '+ New Session'}
+              ${showForm ? '\u2715 Cancel' : '+ New Session'}
             </button>
           </div>
 
@@ -681,7 +945,7 @@
             <div class="session-list">
               ${sessions.length === 0 && html`
                 <div class="session-empty">
-                  <div class="session-empty-icon">💬</div>
+                  <div class="session-empty-icon">\u{1F4AC}</div>
                   <div class="session-empty-text">No sessions yet</div>
                 </div>
               `}
@@ -724,7 +988,7 @@
                               aria-label="Save session title"
                               disabled=${renamingId === s.id || !editingTitle.trim()}
                             >
-                              ✓
+                              \u2713
                             </button>
                             <button
                               type="button"
@@ -734,7 +998,7 @@
                               onClick=${cancelRename}
                               disabled=${renamingId === s.id}
                             >
-                              ✕
+                              \u2715
                             </button>
                           </div>
                         </form>
@@ -752,7 +1016,7 @@
                           onClick=${(e) => startRename(e, s)}
                           disabled=${deletingId === s.id}
                         >
-                          ✎
+                          \u270E
                         </button>
                         <button
                           class="session-action-btn danger"
@@ -761,7 +1025,7 @@
                           onClick=${(e) => requestDelete(e, s.id)}
                           disabled=${deletingId === s.id || renamingId === s.id}
                         >
-                          ${deletingId === s.id ? '…' : '🗑'}
+                          ${deletingId === s.id ? '\u2026' : '\u{1F5D1}'}
                         </button>
                       </div>
                     `}
@@ -770,7 +1034,227 @@
               })}
             </div>
           </div>
-        </aside>
+        </div>
+      `;
+    }
+
+    // ============ McpPanel ============
+    function McpPanel({ servers, tools, loading, error, onRefresh, onConnect, onDisconnect, onAddServer }) {
+      const [expandedServer, setExpandedServer] = useState(null);
+      const [expandedTool, setExpandedTool] = useState(null);
+      const [showAddForm, setShowAddForm] = useState(false);
+      const [addType, setAddType] = useState('local');
+      const [addName, setAddName] = useState('');
+      const [addCommand, setAddCommand] = useState('');
+      const [addArgs, setAddArgs] = useState('');
+      const [addUrl, setAddUrl] = useState('');
+
+      function serverTools(serverName) {
+        return tools.filter(t => t.server === serverName);
+      }
+
+      function handleAddSubmit(e) {
+        e.preventDefault();
+        const name = addName.trim();
+        if (!name) return;
+        let config;
+        if (addType === 'local') {
+          const cmd = addCommand.trim();
+          if (!cmd) return;
+          const args = addArgs.trim() ? addArgs.trim().split(/\s+/) : [];
+          config = { command: cmd, args };
+        } else {
+          const url = addUrl.trim();
+          if (!url) return;
+          config = { url };
+        }
+        onAddServer(name, config);
+        setAddName('');
+        setAddCommand('');
+        setAddArgs('');
+        setAddUrl('');
+        setShowAddForm(false);
+      }
+
+      return html`
+        <div class="mcp-panel">
+          <div class="mcp-panel-header">
+            <h3>MCP Servers</h3>
+            <button class="icon-btn" onClick=${onRefresh} title="Refresh" disabled=${loading}>
+              ${loading ? '' : '\u21BB'}
+              ${loading && html`<span class="spinner" style="width:14px;height:14px"></span>`}
+            </button>
+          </div>
+          <div class="mcp-server-list">
+            ${error && html`<div class="mcp-server-error">${error}</div>`}
+            ${!loading && servers.length === 0 && !error && html`
+              <div class="observability-empty" style="padding:24px 12px">
+                <div class="observability-empty-icon">\u{1F50C}</div>
+                <div class="observability-empty-text">No MCP servers configured</div>
+              </div>
+            `}
+            ${servers.map(s => {
+              const isExpanded = expandedServer === s.name;
+              const sTools = serverTools(s.name);
+              return html`
+                <div key=${s.name} class="mcp-server-card">
+                  <div class="mcp-server-header" onClick=${() => setExpandedServer(isExpanded ? null : s.name)}>
+                    <span class="tool-card-chevron ${isExpanded ? 'expanded' : ''}">\u25B6</span>
+                    <span class="mcp-server-name">${s.name}</span>
+                    <span class="mcp-server-badge ${s.status}">${s.status}</span>
+                    ${s.tool_count > 0 && html`<span class="mcp-server-tool-count">${s.tool_count} tools</span>`}
+                  </div>
+                  ${isExpanded && html`
+                    <div class="mcp-server-actions">
+                      ${s.status === 'connected' ? html`
+                        <button class="btn btn-sm btn-danger" onClick=${() => onDisconnect(s.name)}>Disconnect</button>
+                      ` : html`
+                        <button class="btn btn-sm btn-success" onClick=${() => onConnect(s.name)}>Connect</button>
+                      `}
+                    </div>
+                    ${s.error && html`<div class="mcp-server-error">${s.error}</div>`}
+                    ${sTools.length > 0 && html`
+                      <div class="mcp-tools-list">
+                        ${sTools.map(t => {
+                          const isToolExpanded = expandedTool === t.namespaced_name;
+                          return html`
+                            <div
+                              key=${t.namespaced_name}
+                              class="mcp-tool-item"
+                              onClick=${() => setExpandedTool(isToolExpanded ? null : t.namespaced_name)}
+                            >
+                              <span class="mcp-tool-name">${t.name}</span>
+                              ${t.description && html`<span class="mcp-tool-desc ${isToolExpanded ? 'expanded' : ''}">${t.description}</span>`}
+                            </div>
+                          `;
+                        })}
+                      </div>
+                    `}
+                  `}
+                </div>
+              `;
+            })}
+          </div>
+          <div class="mcp-add-section">
+            ${!showAddForm ? html`
+              <button class="mcp-add-toggle" onClick=${() => setShowAddForm(true)}>+ Add Server</button>
+            ` : html`
+              <form class="mcp-add-form" onSubmit=${handleAddSubmit}>
+                <div class="form-group">
+                  <label>Name</label>
+                  <input class="input" type="text" value=${addName} onInput=${(e) => setAddName(e.target.value)} placeholder="my-server" required />
+                </div>
+                <div class="form-group">
+                  <label>Type</label>
+                  <div class="mcp-type-toggle">
+                    <button type="button" class="mcp-type-btn ${addType === 'local' ? 'active' : ''}" onClick=${() => setAddType('local')}>Local</button>
+                    <button type="button" class="mcp-type-btn ${addType === 'remote' ? 'active' : ''}" onClick=${() => setAddType('remote')}>Remote</button>
+                  </div>
+                </div>
+                ${addType === 'local' ? html`
+                  <div class="form-group">
+                    <label>Command</label>
+                    <input class="input" type="text" value=${addCommand} onInput=${(e) => setAddCommand(e.target.value)} placeholder="npx" required />
+                  </div>
+                  <div class="form-group">
+                    <label>Args (space-separated)</label>
+                    <input class="input" type="text" value=${addArgs} onInput=${(e) => setAddArgs(e.target.value)} placeholder="-y @modelcontextprotocol/server-filesystem /tmp" />
+                  </div>
+                ` : html`
+                  <div class="form-group">
+                    <label>URL</label>
+                    <input class="input" type="text" value=${addUrl} onInput=${(e) => setAddUrl(e.target.value)} placeholder="http://localhost:3000/mcp" required />
+                  </div>
+                `}
+                <div class="form-actions" style="display:flex;gap:6px">
+                  <button type="submit" class="btn btn-sm btn-success">Add</button>
+                  <button type="button" class="btn btn-sm" onClick=${() => setShowAddForm(false)}>Cancel</button>
+                </div>
+              </form>
+            `}
+          </div>
+        </div>
+      `;
+    }
+
+    // ============ SkillsPanel ============
+    function SkillsPanel({ skills, loading, error, onRefresh, onLoadDetail }) {
+      const [expandedSkill, setExpandedSkill] = useState(null);
+      const [skillDetail, setSkillDetail] = useState(null);
+      const [detailLoading, setDetailLoading] = useState(false);
+
+      async function toggleSkill(name) {
+        if (expandedSkill === name) {
+          setExpandedSkill(null);
+          setSkillDetail(null);
+          return;
+        }
+        setExpandedSkill(name);
+        setSkillDetail(null);
+        setDetailLoading(true);
+        const detail = await onLoadDetail(name);
+        setSkillDetail(detail);
+        setDetailLoading(false);
+      }
+
+      return html`
+        <div class="skills-panel">
+          <div class="skills-panel-header">
+            <h3>Skills</h3>
+            <button class="icon-btn" onClick=${onRefresh} title="Refresh" disabled=${loading}>
+              ${loading ? '' : '\u21BB'}
+              ${loading && html`<span class="spinner" style="width:14px;height:14px"></span>`}
+            </button>
+          </div>
+          <div class="skills-list">
+            ${error && html`<div class="mcp-server-error">${error}</div>`}
+            ${!loading && skills.length === 0 && !error && html`
+              <div class="observability-empty" style="padding:24px 12px">
+                <div class="observability-empty-icon">\u{1F9E0}</div>
+                <div class="observability-empty-text">No skills found</div>
+              </div>
+            `}
+            ${loading && skills.length === 0 && html`
+              <div class="observability-empty" style="padding:24px 12px">
+                <span class="spinner"></span>
+                <div class="observability-empty-text" style="margin-top:8px">Loading skills...</div>
+              </div>
+            `}
+            ${skills.map(s => {
+              const isExpanded = expandedSkill === s.name;
+              return html`
+                <div key=${s.name} class="skill-card">
+                  <div class="skill-header" onClick=${() => toggleSkill(s.name)}>
+                    <span class="skill-chevron ${isExpanded ? 'expanded' : ''}">\u25B6</span>
+                    <span class="skill-name">${s.name}</span>
+                    <span class="skill-desc-short">${s.description}</span>
+                  </div>
+                  ${isExpanded && html`
+                    <div class="skill-detail">
+                      ${detailLoading && html`
+                        <div style="display:flex;align-items:center;gap:8px;padding:8px 0">
+                          <span class="spinner"></span>
+                          <span style="font-size:12px;color:var(--muted)">Loading...</span>
+                        </div>
+                      `}
+                      ${!detailLoading && skillDetail && html`
+                        <div class="skill-body" dangerouslySetInnerHTML=${{ __html: renderMd(skillDetail.body) }} />
+                        ${skillDetail.files && skillDetail.files.length > 0 && html`
+                          <div class="skill-files">
+                            <div class="skill-files-title">Associated files</div>
+                            ${skillDetail.files.map(f => html`
+                              <div key=${f} class="skill-file-item">${f}</div>
+                            `)}
+                          </div>
+                        `}
+                      `}
+                    </div>
+                  `}
+                </div>
+              `;
+            })}
+          </div>
+        </div>
       `;
     }
 

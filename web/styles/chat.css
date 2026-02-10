@@ -161,6 +161,85 @@
   line-height: 1.5;
 }
 
+.message-text ul,
+.message-text ol {
+  padding-left: 1.5em;
+  margin: 8px 0;
+}
+
+.message-text ul:last-child,
+.message-text ol:last-child {
+  margin-bottom: 0;
+}
+
+.message-text ul:first-child,
+.message-text ol:first-child {
+  margin-top: 0;
+}
+
+.message-text li {
+  margin: 4px 0;
+}
+
+.message-text li > ul,
+.message-text li > ol {
+  margin: 4px 0;
+}
+
+.message-text blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.message-text blockquote:last-child {
+  margin-bottom: 0;
+}
+
+.message-text h1,
+.message-text h2,
+.message-text h3,
+.message-text h4,
+.message-text h5,
+.message-text h6 {
+  margin: 16px 0 8px 0;
+}
+
+.message-text h1:first-child,
+.message-text h2:first-child,
+.message-text h3:first-child,
+.message-text h4:first-child,
+.message-text h5:first-child,
+.message-text h6:first-child {
+  margin-top: 0;
+}
+
+.message-text hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.message-text table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+  font-size: 13px;
+}
+
+.message-text th,
+.message-text td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.message-text th {
+  background: rgba(0, 0, 0, 0.2);
+  font-weight: 600;
+}
+
 /* Message Parts Container */
 .message-parts {
   display: flex;
