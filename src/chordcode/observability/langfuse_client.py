@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 from chordcode.config import LangfuseConfig
-from chordcode.log import log
+from chordcode.log import logger
 
 _langfuse_instance: Optional["Langfuse"] = None
 
@@ -16,8 +16,9 @@ def init_langfuse(config: LangfuseConfig) -> Optional["Langfuse"]:
         return None
     
     if not config.public_key or not config.secret_key:
-        log.bind(event="langfuse.disabled").warning(
+        logger.warning(
             "LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY not set; tracing disabled",
+            event="langfuse.disabled",
         )
         _langfuse_instance = None
         return None
@@ -34,16 +35,19 @@ def init_langfuse(config: LangfuseConfig) -> Optional["Langfuse"]:
             debug=config.debug,
         )
 
-        log.bind(event="langfuse.init", environment=config.environment, base_url=config.base_url).info(
+        logger.info(
             "Langfuse initialized",
+            event="langfuse.init",
+            environment=config.environment,
+            base_url=config.base_url,
         )
         return _langfuse_instance
     except ImportError:
-        log.bind(event="langfuse.disabled").warning("langfuse package not installed; tracing disabled")
+        logger.warning("langfuse package not installed; tracing disabled", event="langfuse.disabled")
         _langfuse_instance = None
         return None
     except Exception as e:
-        log.bind(event="langfuse.init.error").opt(exception=e).error("Error initializing Langfuse")
+        logger.error("Error initializing Langfuse", event="langfuse.init.error", exc_info=e)
         _langfuse_instance = None
         return None
 
@@ -58,9 +62,9 @@ def flush_langfuse() -> None:
     if _langfuse_instance is not None:
         try:
             _langfuse_instance.flush()
-            log.bind(event="langfuse.flush").debug("Langfuse flushed")
+            logger.debug("Langfuse flushed", event="langfuse.flush")
         except Exception as e:
-            log.bind(event="langfuse.flush.error").opt(exception=e).error("Error flushing Langfuse")
+            logger.error("Error flushing Langfuse", event="langfuse.flush.error", exc_info=e)
 
 
 def shutdown_langfuse() -> None:
@@ -71,8 +75,8 @@ def shutdown_langfuse() -> None:
         try:
             _langfuse_instance.flush()
             _langfuse_instance.shutdown()
-            log.bind(event="langfuse.shutdown").debug("Langfuse shutdown")
+            logger.debug("Langfuse shutdown", event="langfuse.shutdown")
         except Exception as e:
-            log.bind(event="langfuse.shutdown.error").opt(exception=e).error("Error during Langfuse shutdown")
+            logger.error("Error during Langfuse shutdown", event="langfuse.shutdown.error", exc_info=e)
         finally:
             _langfuse_instance = None

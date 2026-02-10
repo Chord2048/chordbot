@@ -144,3 +144,20 @@ class PermissionReply(BaseModel):
     reply: Literal["once", "always", "reject"]
     message: Optional[str] = None
 
+
+# --- API Request Models (for OpenAPI schema) ---
+
+class CreateSessionRequest(BaseModel):
+    worktree: str = Field(..., description="Absolute path to the worktree directory")
+    title: str = Field(default="New session", description="Session title")
+    cwd: str = Field(default="", description="Current working directory (defaults to worktree)")
+    permission_rules: Optional[list[PermissionRule]] = Field(default=None, description="Permission rules (defaults to global config)")
+
+
+class AddMessageRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="User message text")
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(..., min_length=1, description="New session title")
+

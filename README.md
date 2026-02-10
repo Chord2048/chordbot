@@ -36,6 +36,19 @@ This project uses `loguru` and writes:
 - Console: human-friendly, colored logs
 - File: JSONL (one JSON object per line), rotated daily and retained for 7 days by default
 
+Recommended usage in code:
+```python
+from chordcode.log import logger
+
+logger.info("Session started", event="session.start", session_id="s1")
+logger.error("Tool failed", event="tool.error", tool_name="bash", exc_info=err)
+
+with logger.context(session_id="s1", message_id="m1", event="session.turn"):
+    logger.debug("Running turn", turn=2)
+```
+
+The old `log.bind(...)`, `log_context(...)`, and `log_event(...)` APIs have been removed.
+
 Env vars (all optional):
 - `CHORDCODE_LOG_LEVEL` (default: `INFO`)
 - `CHORDCODE_LOG_CONSOLE` (default: `true`)

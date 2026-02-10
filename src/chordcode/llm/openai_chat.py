@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
-from chordcode.log import log_event
+from chordcode.log import logger
 
 try:
     from langfuse.openai import AsyncOpenAI
@@ -92,11 +92,10 @@ class OpenAIChatProvider:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self._model = model
         self._langfuse_enabled = langfuse_enabled and LANGFUSE_AVAILABLE
-        
+
         if langfuse_enabled and not LANGFUSE_AVAILABLE:
-            log_event(
+            logger.warning(
                 "Langfuse requested but not available; using standard OpenAI client",
-                level="warning",
                 event="llm.langfuse.unavailable",
             )
 
@@ -135,9 +134,8 @@ class OpenAIChatProvider:
             if langfuse_parent_observation_id:
                 kw["parent_observation_id"] = langfuse_parent_observation_id
 
-        log_event(
+        logger.debug(
             "Creating OpenAI-compatible streaming request",
-            level="debug",
             event="llm.provider.request.start",
             model=self._model,
             system_chars=len(system),
@@ -160,19 +158,17 @@ class OpenAIChatProvider:
                 **kw,
             )
         except Exception as e:
-            log_event(
+            logger.error(
                 "Failed to create OpenAI-compatible streaming request",
-                level="error",
                 event="llm.provider.request.error",
-                exception=e,
+                exc_info=e,
                 model=self._model,
                 duration_ms=float((time.perf_counter() - req_started) * 1000),
             )
             yield Error(type="error", message=str(e))
             return
-        log_event(
+        logger.debug(
             "OpenAI-compatible streaming request created",
-            level="debug",
             event="llm.provider.request.ready",
             model=self._model,
             duration_ms=float((time.perf_counter() - req_started) * 1000),
@@ -189,9 +185,8 @@ class OpenAIChatProvider:
             async for chunk in stream:
                 chunk_count += 1
                 if not chunk.choices:
-                    log_event(
+                    logger.warning(
                         "Received empty choices in streaming chunk",
-                        level="warning",
                         event="llm.provider.chunk.empty",
                         model=self._model,
                         chunk_index=chunk_count,
@@ -222,11 +217,10 @@ class OpenAIChatProvider:
                             c["args"] += tc.function.arguments
                         calls[idx] = c
         except Exception as e:
-            log_event(
+            logger.error(
                 "Failed while reading OpenAI-compatible stream",
-                level="error",
                 event="llm.provider.stream.error",
-                exception=e,
+                exc_info=e,
                 model=self._model,
                 chunk_count=chunk_count,
                 duration_ms=float((time.perf_counter() - stream_started) * 1000),
@@ -244,9 +238,8 @@ class OpenAIChatProvider:
                     emitted_tool_calls += 1
                     yield ToolCall(type="tool_call", call_id=c["id"], name=c["name"], args_json=c["args"])
                     continue
-                log_event(
+                logger.warning(
                     "Dropped incomplete tool call from streaming response",
-                    level="warning",
                     event="llm.provider.tool_call.incomplete",
                     model=self._model,
                     call_index=idx,
@@ -255,9 +248,8 @@ class OpenAIChatProvider:
                     args_chars=len(c["args"]),
                 )
 
-        log_event(
+        logger.debug(
             "OpenAI-compatible stream finished",
-            level="debug",
             event="llm.provider.stream.finish",
             model=self._model,
             finish_reason=finish_reason,

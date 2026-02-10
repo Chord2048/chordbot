@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sys
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from loguru import logger as _logger
-
-import contextvars
 
 _CONFIGURED = False
 _HANDLER_IDS: list[int] = []
@@ -74,6 +74,14 @@ def _exception_payload(ex: Any) -> dict[str, Any] | None:
         return {"type": "Unknown", "message": None, "traceback": None}
 
 
+def _captured_exception_payload(exc: BaseException) -> dict[str, Any]:
+    return {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+    }
+
+
 def _jsonl_payload(record: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = record.get("extra") or {}
 
@@ -95,6 +103,10 @@ def _jsonl_payload(record: dict[str, Any]) -> dict[str, Any]:
             payload[k] = v
 
     ex = _exception_payload(record.get("exception"))
+    if ex is None:
+        captured = extra.get("_captured_exception")
+        if isinstance(captured, dict):
+            ex = captured
     if ex:
         payload["exception"] = ex
 
@@ -130,6 +142,104 @@ def _console_ctx(extra: dict[str, Any]) -> str:
     if isinstance(duration_ms, (int, float)):
         parts.append(f"{duration_ms:.1f}ms")
     return (" | " + " ".join(parts)) if parts else ""
+
+
+def _split_fields(fields: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    ctx: dict[str, object] = {}
+    extra: dict[str, object] = {}
+    for key, value in fields.items():
+        if key in _CTX_VARS:
+            ctx[key] = value
+        else:
+            extra[key] = value
+    return ctx, extra
+
+
+@contextmanager
+def _push_context(ctx: dict[str, object]) -> Iterator[None]:
+    tokens: list[tuple[contextvars.ContextVar[object | None], contextvars.Token[object | None]]] = []
+    for key, value in ctx.items():
+        var = _CTX_VARS.get(key)
+        if var is None:
+            continue
+        tokens.append((var, var.set(value)))
+    try:
+        yield
+    finally:
+        for var, tok in reversed(tokens):
+            var.reset(tok)
+
+
+class AppLogger:
+    def __init__(
+        self,
+        raw: Any,
+        *,
+        default_context: dict[str, object] | None = None,
+        default_extra: dict[str, object] | None = None,
+    ) -> None:
+        self._raw = raw
+        self._default_context = dict(default_context or {})
+        self._default_extra = dict(default_extra or {})
+
+    def child(self, **fields: object) -> AppLogger:
+        child_ctx, child_extra = _split_fields(fields)
+        return AppLogger(
+            self._raw,
+            default_context={**self._default_context, **child_ctx},
+            default_extra={**self._default_extra, **child_extra},
+        )
+
+    @contextmanager
+    def context(self, **ctx: object) -> Iterator[None]:
+        merged = {**self._default_context, **ctx}
+        with _push_context(merged):
+            yield
+
+    def _emit(
+        self,
+        level: str,
+        message: str,
+        *,
+        exc_info: BaseException | bool | None = None,
+        **fields: object,
+    ) -> None:
+        ctx, extra = _split_fields(fields)
+        merged_ctx = {**self._default_context, **ctx}
+        merged_extra = {**self._default_extra, **extra}
+
+        with _push_context(merged_ctx):
+            logger_obj = self._raw.bind(**merged_extra) if merged_extra else self._raw
+            if isinstance(exc_info, BaseException):
+                logger_obj = logger_obj.bind(_captured_exception=_captured_exception_payload(exc_info))
+            elif exc_info is True:
+                active_exc = sys.exc_info()[1]
+                if isinstance(active_exc, BaseException):
+                    logger_obj = logger_obj.bind(_captured_exception=_captured_exception_payload(active_exc))
+            method = getattr(logger_obj, level)
+            method(message)
+
+    def debug(self, message: str, /, **fields: object) -> None:
+        self._emit("debug", message, **fields)
+
+    def info(self, message: str, /, **fields: object) -> None:
+        self._emit("info", message, **fields)
+
+    def warning(self, message: str, /, **fields: object) -> None:
+        self._emit("warning", message, **fields)
+
+    def error(
+        self,
+        message: str,
+        /,
+        *,
+        exc_info: BaseException | bool | None = None,
+        **fields: object,
+    ) -> None:
+        self._emit("error", message, exc_info=exc_info, **fields)
+
+    def exception(self, message: str, /, **fields: object) -> None:
+        self._emit("error", message, exc_info=True, **fields)
 
 
 def init_logging(*, force: bool = False) -> None:
@@ -207,52 +317,7 @@ def shutdown_logging() -> None:
     _logger.disable("chordcode")
 
 
-@contextmanager
-def log_context(**kwargs: object):
-    tokens: list[tuple[contextvars.ContextVar[object | None], contextvars.Token[object | None]]] = []
-    for k, v in kwargs.items():
-        var = _CTX_VARS.get(k)
-        if var is None:
-            continue
-        tokens.append((var, var.set(v)))
-    try:
-        yield
-    finally:
-        for var, tok in reversed(tokens):
-            var.reset(tok)
-
-
-def log_event(
-    message: str,
-    *,
-    level: str = "info",
-    event: str | None = None,
-    exception: BaseException | None = None,
-    **fields: object,
-) -> None:
-    """
-    Emit a structured log with context keys routed via `log_context`
-    and non-context keys stored under `extra`.
-    """
-    ctx: dict[str, object] = {}
-    extra: dict[str, object] = {}
-    for k, v in fields.items():
-        if k in _CTX_VARS:
-            ctx[k] = v
-        else:
-            extra[k] = v
-    if event is not None:
-        ctx["event"] = event
-
-    with log_context(**ctx):
-        logger = _logger.bind(**extra) if extra else _logger
-        if exception is not None:
-            logger = logger.opt(exception=exception)
-        method = getattr(logger, level.lower())
-        method(message)
-
-
-log = _logger
+logger = AppLogger(_logger)
 
 # Keep library output quiet by default; enable after init_logging() so callers
 # don't get noisy logs when importing modules in tests/scripts.

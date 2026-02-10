@@ -4,7 +4,7 @@ from typing import Any
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooks
 from chordcode.observability.langfuse_client import get_langfuse
-from chordcode.log import log
+from chordcode.log import logger
 
 
 def create_langfuse_hook() -> Hooks:
@@ -34,7 +34,7 @@ def create_langfuse_hook() -> Hooks:
                 }
             )
         except Exception as e:
-            log.bind(event="langfuse.hook.chat_params.error").opt(exception=e).error("Error logging chat params")
+            logger.error("Error logging chat params", event="langfuse.hook.chat_params.error", exc_info=e)
     
     async def on_chat_headers(input: dict[str, Any], output: dict[str, Any]) -> None:
         """Update current observation with custom chat headers."""
@@ -47,7 +47,7 @@ def create_langfuse_hook() -> Hooks:
                     }
                 )
         except Exception as e:
-            log.bind(event="langfuse.hook.chat_headers.error").opt(exception=e).error("Error logging chat headers")
+            logger.error("Error logging chat headers", event="langfuse.hook.chat_headers.error", exc_info=e)
     
     async def on_tool_execute_before(input: dict[str, Any], output: dict[str, Any]) -> None:
         """Update current observation with tool execution start info."""
@@ -67,7 +67,7 @@ def create_langfuse_hook() -> Hooks:
                     }
                 )
         except Exception as e:
-            log.bind(event="langfuse.hook.tool_before.error").opt(exception=e).error("Error logging tool execute before")
+            logger.error("Error logging tool execute before", event="langfuse.hook.tool_before.error", exc_info=e)
     
     async def on_tool_execute_after(input: dict[str, Any], output: dict[str, Any]) -> None:
         """Update current observation with tool execution completion info."""
@@ -89,7 +89,7 @@ def create_langfuse_hook() -> Hooks:
                     }
                 )
         except Exception as e:
-            log.bind(event="langfuse.hook.tool_after.error").opt(exception=e).error("Error logging tool execute after")
+            logger.error("Error logging tool execute after", event="langfuse.hook.tool_after.error", exc_info=e)
     
     async def on_system_transform(input: dict[str, Any], output: dict[str, Any]) -> None:
         """Update current observation with system prompt transformation info."""
@@ -105,7 +105,7 @@ def create_langfuse_hook() -> Hooks:
                     }
                 )
         except Exception as e:
-            log.bind(event="langfuse.hook.system_transform.error").opt(exception=e).error("Error logging system transform")
+            logger.error("Error logging system transform", event="langfuse.hook.system_transform.error", exc_info=e)
     
     async def on_messages_transform(input: dict[str, Any], output: dict[str, Any]) -> None:
         """Update current observation with message transformation info."""
@@ -121,7 +121,7 @@ def create_langfuse_hook() -> Hooks:
                     }
                 )
         except Exception as e:
-            log.bind(event="langfuse.hook.messages_transform.error").opt(exception=e).error("Error logging messages transform")
+            logger.error("Error logging messages transform", event="langfuse.hook.messages_transform.error", exc_info=e)
     
     # Return the hooks dictionary
     return {

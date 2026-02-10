@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable, cast, overload
 
-from chordcode.log import log as logger
+from chordcode.log import logger
 
 from chordcode.hookdefs import (
     ChatHeadersInput,
@@ -147,6 +147,6 @@ def loghook(*, enabled: bool | None = None) -> Hooks:
         if inp is not None:
             msg += f" in={list(inp.keys()) if isinstance(inp, dict) else type(inp).__name__}"
 
-        logger.bind(event="hook.debug").debug(msg)
+        logger.debug(msg, event="hook.debug")
 
     return {HookName.All: emit}

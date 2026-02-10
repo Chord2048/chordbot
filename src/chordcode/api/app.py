@@ -20,8 +20,11 @@ from chordcode.hooks import Hooker, loghook
 from chordcode.llm.openai_chat import OpenAIChatProvider
 from chordcode.loop.interrupt import InterruptManager
 from chordcode.loop.session_loop import SessionLoop
-from chordcode.log import init_logging, log
-from chordcode.model import Message, ModelRef, PermissionReply, PermissionRule, Session, TextPart
+from chordcode.log import init_logging, logger
+from chordcode.model import (
+    AddMessageRequest, CreateSessionRequest, Message, ModelRef,
+    PermissionReply, PermissionRule, RenameSessionRequest, Session, TextPart,
+)
 from chordcode.observability.langfuse_client import init_langfuse, flush_langfuse, shutdown_langfuse
 from chordcode.observability.langfuse_hook import create_langfuse_hook
 from chordcode.permission.service import PermissionService
@@ -38,7 +41,7 @@ load_dotenv(".env", override=True)
 
 cfg = load()
 init_logging()
-log.bind(event="app.start", model=cfg.openai.model, openai_base_url=cfg.openai.base_url).info("Chord Code starting")
+logger.info("Chord Code starting", event="app.start", model=cfg.openai.model, openai_base_url=cfg.openai.base_url)
 bus = Bus()
 store = SQLiteStore(cfg.db_path)
 hooks = Hooker()
@@ -251,14 +254,13 @@ async def list_logs(
 
 
 @app.post("/sessions")
-async def create_session(body: dict):
-    worktree = str(body.get("worktree", "")).strip()
+async def create_session(body: CreateSessionRequest):
+    worktree = body.worktree.strip()
     if not worktree or not os.path.isabs(worktree):
         raise HTTPException(status_code=400, detail="worktree must be an absolute path")
-    title = str(body.get("title") or "New session").strip()
-    cwd = str(body.get("cwd") or worktree).strip()
-    rules = body.get("permission_rules")
-    permission_rules = [PermissionRule.model_validate(x) for x in rules] if rules else _default_rules()
+    title = body.title.strip() or "New session"
+    cwd = body.cwd.strip() or worktree
+    permission_rules = [PermissionRule.model_validate(x) for x in body.permission_rules] if body.permission_rules else _default_rules()
     now = int(time.time() * 1000)
     s = Session(
         id=str(uuid4()),
@@ -282,8 +284,8 @@ async def list_sessions(limit: int = 50, offset: int = 0):
 
 
 @app.patch("/sessions/{session_id}")
-async def rename_session(session_id: str, body: dict):
-    title = str(body.get("title") or "").strip()
+async def rename_session(session_id: str, body: RenameSessionRequest):
+    title = body.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="title is required")
     await _get_session_or_404(session_id)
@@ -306,9 +308,9 @@ async def delete_session(session_id: str):
 
 
 @app.post("/sessions/{session_id}/messages")
-async def add_message(session_id: str, body: dict):
+async def add_message(session_id: str, body: AddMessageRequest):
     session = await store.get_session(session_id)
-    text = str(body.get("text", ""))
+    text = body.text
     if not text.strip():
         raise HTTPException(status_code=400, detail="text is required")
     now = int(time.time() * 1000)
@@ -419,7 +421,6 @@ async def events(session_id: str | None = None):
 
 
 @app.post("/permissions/{request_id}/reply")
-async def reply_permission(request_id: str, body: dict):
-    reply = PermissionReply.model_validate(body)
-    await perm.reply(request_id, reply)
+async def reply_permission(request_id: str, body: PermissionReply):
+    await perm.reply(request_id, body)
     return {"ok": True}

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from chordcode.log import log
+from chordcode.log import logger
 from chordcode.tools.paths import is_within
 
 
@@ -72,12 +72,13 @@ class SkillLoader:
                         continue
                     existing = self._skills.get(parsed.name)
                     if existing:
-                        log.bind(
+                        logger.warning(
+                            "Duplicate skill name ignored",
                             event="skill.duplicate",
                             skill=parsed.name,
                             first=existing.path,
                             duplicate=parsed.path,
-                        ).warning("Duplicate skill name ignored")
+                        )
                         continue
                     self._skills[parsed.name] = parsed
 
@@ -104,7 +105,7 @@ class SkillLoader:
         try:
             content = skill_md.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
-            log.bind(event="skill.read.error", path=str(skill_md)).opt(exception=e).warning("Failed to read skill file")
+            logger.warning("Failed to read skill file", event="skill.read.error", path=str(skill_md), exc_info=e)
             return None
 
         normalized = content.replace("\r\n", "\n")
@@ -113,9 +114,7 @@ class SkillLoader:
 
         m = _FRONTMATTER_RE.match(normalized)
         if not m:
-            log.bind(event="skill.invalid", path=str(skill_md), reason="missing_frontmatter").warning(
-                "Invalid skill file",
-            )
+            logger.warning("Invalid skill file", event="skill.invalid", path=str(skill_md), reason="missing_frontmatter")
             return None
 
         raw_frontmatter, body = m.groups()
@@ -124,24 +123,25 @@ class SkillLoader:
         description = frontmatter.get("description", "")
 
         if not name:
-            log.bind(event="skill.invalid", path=str(skill_md), reason="missing_name").warning("Invalid skill file")
+            logger.warning("Invalid skill file", event="skill.invalid", path=str(skill_md), reason="missing_name")
             return None
         if not description or len(description) > 1024:
-            log.bind(event="skill.invalid", path=str(skill_md), reason="invalid_description").warning("Invalid skill file")
+            logger.warning("Invalid skill file", event="skill.invalid", path=str(skill_md), reason="invalid_description")
             return None
         if not _SKILL_NAME_RE.fullmatch(name):
-            log.bind(event="skill.invalid", path=str(skill_md), reason="invalid_name").warning("Invalid skill file")
+            logger.warning("Invalid skill file", event="skill.invalid", path=str(skill_md), reason="invalid_name")
             return None
 
         expected_name = skill_md.parent.name
         if name != expected_name:
-            log.bind(
+            logger.warning(
+                "Invalid skill file",
                 event="skill.invalid",
                 path=str(skill_md),
                 reason="name_mismatch",
                 expected=expected_name,
                 actual=name,
-            ).warning("Invalid skill file")
+            )
             return None
 
         return SkillInfo(
