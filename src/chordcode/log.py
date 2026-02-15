@@ -216,6 +216,9 @@ class AppLogger:
                 active_exc = sys.exc_info()[1]
                 if isinstance(active_exc, BaseException):
                     logger_obj = logger_obj.bind(_captured_exception=_captured_exception_payload(active_exc))
+            # Use opt(depth=2) to skip AppLogger._emit and AppLogger.{debug,info,...}
+            # so that the log record captures the actual caller's module/function/line.
+            logger_obj = logger_obj.opt(depth=2)
             method = getattr(logger_obj, level)
             method(message)
 

@@ -25,9 +25,27 @@ class LangfuseConfig:
 
 
 @dataclass(frozen=True)
+class KBConfig:
+    backend: str           # "lightrag" | "none"
+    base_url: str          # LightRAG server URL (empty = KB disabled)
+    api_key: str           # Optional auth token
+
+
+@dataclass(frozen=True)
+class VLMConfig:
+    backend: str           # "paddleocr" | "none"
+    api_url: str           # PaddleOCR async API base URL
+    api_key: str           # PaddleOCR bearer token
+    poll_interval: int     # Seconds between status polls
+    timeout: int           # Max wait seconds
+
+
+@dataclass(frozen=True)
 class Config:
     openai: OpenAIConfig
     langfuse: LangfuseConfig
+    kb: KBConfig
+    vlm: VLMConfig
     system_prompt: str
     db_path: str
     default_worktree: str
@@ -108,6 +126,18 @@ def load() -> Config:
             environment=langfuse_environment,
             sample_rate=langfuse_sample_rate,
             debug=langfuse_debug,
+        ),
+        kb=KBConfig(
+            backend=os.environ.get("CHORDCODE_KB_BACKEND", "lightrag").strip(),
+            base_url=os.environ.get("CHORDCODE_KB_BASE_URL", "").strip(),
+            api_key=os.environ.get("CHORDCODE_KB_API_KEY", "").strip(),
+        ),
+        vlm=VLMConfig(
+            backend=os.environ.get("CHORDCODE_KB_VLM_BACKEND", "none").strip(),
+            api_url=os.environ.get("CHORDCODE_KB_VLM_API_URL", "").strip(),
+            api_key=os.environ.get("CHORDCODE_KB_VLM_API_KEY", "").strip(),
+            poll_interval=int(os.environ.get("CHORDCODE_KB_VLM_POLL_INTERVAL", "5").strip()),
+            timeout=int(os.environ.get("CHORDCODE_KB_VLM_TIMEOUT", "1800").strip()),
         ),
         system_prompt=system_prompt,
         db_path=db_path,

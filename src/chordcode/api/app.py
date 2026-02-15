@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +36,7 @@ from chordcode.tools.skill import SkillCtx, SkillTool
 from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
 from chordcode.tools.web import TavilySearchTool, WebFetchTool
+from chordcode.tools.kb_search import KBSearchCtx, KBSearchTool
 from chordcode.mcp import MCPManager, MCPToolAdapter, load_mcp_configs, MCPServerConfig
 from chordcode.skills.loader import SkillLoader
 
@@ -62,6 +63,23 @@ if langfuse_hook:
 
 perm = PermissionService(bus, store, hooks)
 mcp_manager = MCPManager(bus=bus)
+
+# Initialize KB backend (optional — disabled when base_url is empty)
+kb_client = None
+vlm_client = None
+
+if cfg.kb.base_url:
+    from chordcode.kb.lightrag_client import LightRAGClient
+    kb_client = LightRAGClient(base_url=cfg.kb.base_url, api_key=cfg.kb.api_key)
+    logger.info("KB backend enabled", event="kb.init", backend=cfg.kb.backend, base_url=cfg.kb.base_url)
+
+if cfg.vlm.backend == "paddleocr" and cfg.vlm.api_url:
+    from chordcode.kb.paddleocr_client import PaddleOCRClient
+    vlm_client = PaddleOCRClient(
+        api_url=cfg.vlm.api_url, api_key=cfg.vlm.api_key,
+        poll_interval=cfg.vlm.poll_interval, timeout=cfg.vlm.timeout,
+    )
+    logger.info("VLM parser enabled", event="vlm.init", backend=cfg.vlm.backend)
 
 llm = OpenAIChatProvider(
     base_url=cfg.openai.base_url,
@@ -370,6 +388,10 @@ async def run_session(session_id: str):
         TodoWriteTool(store=store, bus=bus),
     ]
 
+    # Conditionally register KB search tool
+    if kb_client is not None:
+        builtin_tools.append(KBSearchTool(KBSearchCtx(kb=kb_client)))
+
     # Inject MCP tools alongside built-in tools
     mcp_tool_infos = await mcp_manager.list_tools()
     mcp_tools = [MCPToolAdapter(info, mcp_manager) for info in mcp_tool_infos]
@@ -559,3 +581,130 @@ async def mcp_add_server(body: dict[str, Any]):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"ok": True, "name": name}
+
+
+# -- KB endpoints --
+
+def _require_kb():
+    if kb_client is None:
+        raise HTTPException(status_code=404, detail="Knowledge base is not configured")
+    return kb_client
+
+
+@app.get("/kb/config")
+async def kb_config():
+    logger.debug("KB config requested", event="api.kb.config")
+    return {
+        "enabled": kb_client is not None,
+        "backend": cfg.kb.backend if kb_client else "none",
+        "vlm_available": vlm_client is not None,
+        "vlm_backend": cfg.vlm.backend if vlm_client else "none",
+    }
+
+
+@app.post("/kb/documents/upload")
+async def kb_upload_file(file: UploadFile, use_vlm: bool = False):
+    kb = _require_kb()
+    file_bytes = await file.read()
+    filename = file.filename or "upload"
+    logger.info("API: KB upload file", event="api.kb.upload", filename=filename, size=len(file_bytes), use_vlm=use_vlm)
+
+    if use_vlm:
+        if vlm_client is None:
+            raise HTTPException(status_code=400, detail="VLM parser is not configured")
+        job_id = await vlm_client.submit(file_bytes, filename)
+        parse_result = await vlm_client.wait_for_result(job_id)
+        text = "\n\n".join(parse_result.markdown_pages)
+        logger.info("API: VLM parse done for upload", event="api.kb.upload.vlm_done", filename=filename, pages=len(parse_result.markdown_pages))
+        # Upload the VLM-parsed markdown as a .md file
+        md_filename = filename.rsplit(".", 1)[0] + ".md" if "." in filename else filename + ".md"
+        file_bytes = text.encode("utf-8")
+        filename = md_filename
+
+    result = await kb.upload_file(file_bytes, filename)
+
+    return result.model_dump()
+
+
+@app.delete("/kb/documents")
+async def kb_delete_documents(body: dict[str, Any]):
+    kb = _require_kb()
+    doc_ids = body.get("doc_ids", [])
+    if not doc_ids or not isinstance(doc_ids, list):
+        raise HTTPException(status_code=400, detail="doc_ids list is required")
+    logger.info("API: KB delete documents", event="api.kb.delete", count=len(doc_ids))
+    return await kb.delete_documents(doc_ids)
+
+
+@app.post("/kb/documents/list")
+async def kb_list_documents(body: dict[str, Any]):
+    kb = _require_kb()
+    page = int(body.get("page", 1))
+    page_size = int(body.get("page_size", 20))
+    status_filter = body.get("status_filter")
+    logger.debug("API: KB list documents", event="api.kb.list", page=page, page_size=page_size, status_filter=status_filter)
+    result = await kb.list_documents(page=page, page_size=page_size, status_filter=status_filter)
+    return result.model_dump()
+
+
+@app.get("/kb/pipeline/status")
+async def kb_pipeline_status():
+    kb = _require_kb()
+    result = await kb.get_pipeline_status()
+    return result.model_dump()
+
+
+@app.get("/kb/status_counts")
+async def kb_status_counts():
+    kb = _require_kb()
+    result = await kb.get_status_counts()
+    return result.model_dump()
+
+
+@app.post("/kb/query")
+async def kb_query(body: dict[str, Any]):
+    kb = _require_kb()
+    query = str(body.get("query", "")).strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    top_k = int(body.get("top_k", 10))
+    logger.info("API: KB query", event="api.kb.query", query=query, top_k=top_k)
+    result = await kb.query(query=query, top_k=top_k)
+    logger.info(
+        "API: KB query done",
+        event="api.kb.query.done",
+        entities=len(result.entities),
+        relationships=len(result.relationships),
+        chunks=len(result.chunks),
+    )
+    return result.model_dump()
+
+
+@app.post("/kb/vlm/parse")
+async def kb_vlm_parse(file: UploadFile):
+    """Parse a file using VLM and return markdown via SSE progress stream."""
+    if vlm_client is None:
+        raise HTTPException(status_code=404, detail="VLM parser is not configured")
+
+    file_bytes = await file.read()
+    filename = file.filename or "upload"
+    logger.info("API: VLM parse requested", event="api.vlm.parse", filename=filename, size=len(file_bytes))
+
+    async def stream():
+        import json as _json
+        try:
+            job_id = await vlm_client.submit(file_bytes, filename)
+            yield f"data: {_json.dumps({'state': 'submitted', 'job_id': job_id})}\n\n"
+
+            result = await vlm_client.wait_for_result(
+                job_id,
+                on_progress=None,
+            )
+            combined = "\n\n".join(result.markdown_pages)
+            logger.info("API: VLM parse completed", event="api.vlm.parse.done", filename=filename, pages=len(result.markdown_pages))
+            yield f"data: {_json.dumps({'state': 'done', 'markdown': combined, 'page_count': len(result.markdown_pages)})}\n\n"
+        except Exception as exc:
+            logger.error("API: VLM parse failed", event="api.vlm.parse.error", filename=filename, error=str(exc))
+            yield f"data: {_json.dumps({'state': 'failed', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")

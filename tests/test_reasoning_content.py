@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from chordcode.bus.bus import Bus
-from chordcode.config import Config, LangfuseConfig, OpenAIConfig
+from chordcode.config import Config, KBConfig, LangfuseConfig, OpenAIConfig, VLMConfig
 from chordcode.hooks import Hooker
 from chordcode.llm.openai_chat import Finish, ReasoningDelta, ToolCall, _extract_reasoning_text
 from chordcode.loop.interrupt import InterruptManager
@@ -110,6 +110,8 @@ class ReasoningToolCallHistoryTests(unittest.IsolatedAsyncioTestCase):
                     sample_rate=1.0,
                     debug=False,
                 ),
+                kb=KBConfig(backend="none", base_url="", api_key=""),
+                vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),
                 system_prompt="sys",
                 db_path=db,
                 default_worktree=tmp,
