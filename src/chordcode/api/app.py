@@ -115,9 +115,8 @@ async def _get_session_or_404(session_id: str) -> Session:
 
 app = FastAPI(title="Chord Code", version="0.1.0")
 
-root = Path(__file__).resolve().parents[3]
-web = root / "web"
-app.mount("/static", StaticFiles(directory=str(web)), name="static")
+_web_dir = Path(__file__).resolve().parent.parent / "web"
+app.mount("/static", StaticFiles(directory=str(_web_dir)), name="static")
 
 
 @app.on_event("startup")
@@ -145,7 +144,7 @@ async def _shutdown():
 
 @app.get("/")
 async def home():
-    return FileResponse(web / "index.html")
+    return FileResponse(_web_dir / "index.html")
 
 @app.get("/config")
 async def get_config():

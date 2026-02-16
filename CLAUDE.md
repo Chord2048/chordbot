@@ -58,11 +58,24 @@ cp config.yaml.example ~/.chordcode/config.yaml
 # 编辑 ~/.chordcode/config.yaml，填入 openai.base_url / api_key / model
 
 uv sync
+
+# 方式 1: CLI（推荐）
+chordcode serve --reload --port 4096
+
+# 方式 2: 直接用 uvicorn
 uv run uvicorn chordcode.api.app:app --reload --port 4096
+```
+
+**CLI 快速验证**
+```bash
+chordcode doctor                          # 检查环境健康
+chordcode config show                     # 查看当前配置
+chordcode run "Reply PONG" --permission allow  # 端到端测试
 ```
 
 **访问**
 - Web UI：`http://127.0.0.1:4096/`
+- CLI 帮助：`chordcode --help`（完整命令树见 `docs/cli.md`）
 
 ## 4. 配置（YAML）
 
@@ -114,7 +127,7 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - `src/chordcode/mcp/`：MCP 客户端支持（config 加载、server 连接管理、tool adapter）
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
-- `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板、Settings 面板）
+- `src/chordcode/web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板、Settings 面板）
 - `docs/project.md`：本项目当前架构/数据流/API/事件结构（强烈建议先看）
 - `CHANGES.md`：版本间改动点与决策背景
 
@@ -122,7 +135,7 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 
 - **不要绕过 permission gate**：任何会执行命令/写文件/跨目录访问的能力，都应显式建模为 tool + permission。
 - **事件驱动优先**：UI/CLI 的状态靠 SSE 订阅事件，而不是轮询/塞私货状态。
-- **变更要“协议先行”**：若改 Part/Message/事件结构，先改 `model.py`，再同步 `session_loop.py` + `api/app.py` + `web/app.js`。
+- **变更要"协议先行"**：若改 Part/Message/事件结构，先改 `model.py`，再同步 `session_loop.py` + `api/app.py` + `src/chordcode/web/app.js`。
 - `src/chord_code.egg-info/` 属于构建产物；一般不需要手改（如需清理，用构建/打包流程处理）。
 - 不要提交包含密钥的配置文件（`~/.chordcode/config.yaml` 中的 `api_key` 等 sensitive 字段）。`.env` 已弃用，项目不再读取环境变量作为配置。
 
@@ -182,9 +195,15 @@ uv run python -m pytest tests/ -v
 4. 更新 `config.yaml.example`；如为新增 section，更新 `CLAUDE.md` 第 4 节
 5. Settings UI 自动从 `/config/schema` 获取字段元数据，无需额外改前端
 
+**新增/调整 CLI 命令**
+1. 在 `src/chordcode/cli/commands/` 下添加或修改命令模块
+2. 在 `src/chordcode/cli/app.py` 中注册到 typer root app
+3. 使用 `client.py` 调用 API；使用 `output.py` 处理 JSON / rich 输出
+4. 更新 `docs/cli.md` 命令树与示例
+
 **改事件结构 / 前端展示**
 1. 先改 `src/chordcode/model.py` / 事件发布处
-2. 再改 `web/app.js` 的 state 管理与渲染函数
+2. 再改 `src/chordcode/web/app.js` 的 state 管理与渲染函数
 3. 用浏览器 + SSE Events 面板核对是否符合预期
 
 **MCP 功能说明（已实现）**
@@ -215,6 +234,7 @@ uv run python -m pytest tests/ -v
 
 - ~~日志：统一 logging~~ ✓ 已完成。通过 `logging.*` YAML 配置控制级别/输出/目录/轮转/保留。
 - ~~配置系统~~ ✓ 已完成。YAML + JSON 文件配置、全局/项目级合并、Config API、Settings UI。
+- ~~CLI 工具~~ ✓ 已完成。`chordcode` CLI（typer + rich），完整命令树见 `docs/cli.md`。入口 `src/chordcode/cli/app.py`。
 - 运行脚本：提供 `scripts/`（dev/run/test/format/lint/doctor）统一入口，减少每次手动拼命令。
 - CLI 调试工具：可以一键 `create session -> send message -> run -> stream events -> reply permissions`，用于快速回归与对比不同 LLM/provider 的行为。
 - 固化"验收动作"：为每个新增工具/协议变更提供可重复的 CLI/脚本验证路径（比只靠浏览器点点点更可靠）。

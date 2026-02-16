@@ -1,0 +1,2 @@
+[console_scripts]
+chordcode = chordcode.cli.app:app
