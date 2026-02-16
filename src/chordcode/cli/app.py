@@ -12,6 +12,7 @@ app = typer.Typer(
     help="Chord Code CLI — local-first Agent Core.",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
+    context_settings={"allow_interspersed_args": True},
 )
 
 # ── Global state shared across sub-commands ──────────────────────────
@@ -26,6 +27,17 @@ def _version_callback(value: bool):
     if value:
         typer.echo(f"chordcode {chordcode.__version__}")
         raise typer.Exit()
+
+
+def _apply_global_opts(
+    json: bool = False,
+    base_url: str = "",
+) -> None:
+    """Merge sub-typer global options into state (only if explicitly set)."""
+    if json:
+        state.json_mode = True
+    if base_url:
+        state.base_url = base_url.rstrip("/")
 
 
 @app.callback()

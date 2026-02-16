@@ -8,7 +8,16 @@ import typer
 
 from chordcode.cli.output import Output
 
-sessions_app = typer.Typer(no_args_is_help=True)
+sessions_app = typer.Typer(no_args_is_help=True, context_settings={"allow_interspersed_args": True})
+
+
+@sessions_app.callback()
+def _sessions_callback(
+    json: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    base_url: str = typer.Option("", "--base-url", help="Server base URL."),
+):
+    from chordcode.cli.app import _apply_global_opts
+    _apply_global_opts(json=json, base_url=base_url)
 
 
 def _out() -> Output:
