@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import os
 import time
 from typing import Any, Awaitable, Callable, cast, overload
 
@@ -124,10 +123,12 @@ class Hooker:
         return output
 
 
-def loghook(*, enabled: bool | None = None) -> Hooks:
+def loghook(*, enabled: bool | None = None, cfg: Any = None) -> Hooks:
     on = enabled
+    if on is None and cfg is not None:
+        on = getattr(getattr(cfg, "hooks", None), "debug", False)
     if on is None:
-        on = os.environ.get("CHORDCODE_HOOK_DEBUG", "").strip() not in ("", "0", "false", "False")
+        on = False
     if not on:
         return {}
 

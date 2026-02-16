@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextvars
 import json
-import os
 import sys
 import traceback
 from contextlib import contextmanager
@@ -30,22 +29,6 @@ _CTX_VARS: dict[str, contextvars.ContextVar[object | None]] = {
     k: contextvars.ContextVar(f"chordcode_log_{k}", default=None) for k in _CONTEXT_KEYS
 }
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    s = raw.strip().lower()
-    if s in ("1", "true", "yes", "y", "on"):
-        return True
-    if s in ("0", "false", "no", "n", "off"):
-        return False
-    return default
-
-
-def _env_str(name: str, default: str) -> str:
-    v = os.environ.get(name)
-    return default if v is None else v.strip()
 
 
 def _patch_record(record: dict[str, Any]) -> None:
@@ -245,30 +228,31 @@ class AppLogger:
         self._emit("error", message, exc_info=True, **fields)
 
 
-def init_logging(*, force: bool = False) -> None:
+def init_logging(
+    *,
+    level: str = "INFO",
+    console: bool = True,
+    file: bool = True,
+    log_dir: str = "./data/logs",
+    rotation: str = "00:00",
+    retention: str = "7 days",
+    force: bool = False,
+) -> None:
     """
     Configure Loguru sinks:
     - Console: human-friendly + colored
     - File: JSONL (one JSON object per line), rotated daily, retained for 7 days
-
-    Config via env vars (defaults shown):
-    - CHORDCODE_LOG_LEVEL=INFO
-    - CHORDCODE_LOG_CONSOLE=true
-    - CHORDCODE_LOG_FILE=true
-    - CHORDCODE_LOG_DIR=./data/logs
-    - CHORDCODE_LOG_ROTATION=00:00
-    - CHORDCODE_LOG_RETENTION=7 days
     """
     global _CONFIGURED, _HANDLER_IDS
     if _CONFIGURED and not force:
         return
 
-    level = _env_str("CHORDCODE_LOG_LEVEL", "INFO") or "INFO"
-    enable_console = _env_bool("CHORDCODE_LOG_CONSOLE", True)
-    enable_file = _env_bool("CHORDCODE_LOG_FILE", True)
-    log_dir = Path(_env_str("CHORDCODE_LOG_DIR", "./data/logs") or "./data/logs")
-    rotation = _env_str("CHORDCODE_LOG_ROTATION", "00:00") or "00:00"
-    retention = _env_str("CHORDCODE_LOG_RETENTION", "7 days") or "7 days"
+    level = level or "INFO"
+    enable_console = console
+    enable_file = file
+    log_dir_path = Path(log_dir or "./data/logs")
+    rotation = rotation or "00:00"
+    retention = retention or "7 days"
 
     _logger.remove()
     _logger.configure(patcher=_patch_record)
@@ -288,8 +272,8 @@ def init_logging(*, force: bool = False) -> None:
         )
 
     if enable_file:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        path = log_dir / "chordcode_{time:YYYY-MM-DD}.jsonl"
+        log_dir_path.mkdir(parents=True, exist_ok=True)
+        path = log_dir_path / "chordcode_{time:YYYY-MM-DD}.jsonl"
         _HANDLER_IDS.append(
             _logger.add(
                 str(path),

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import re
 import unittest
-from unittest.mock import patch
 
 from chordcode.prompts.template import render_prompt
 
@@ -83,21 +81,18 @@ class TestRenderPrompt(unittest.TestCase):
         # worktree is not a builtin, so should stay as-is
         self.assertEqual(result, "wt={{worktree}}")
 
-    # -- CHORDCODE_TPL_* env vars --------------------------------------------
+    # -- template_variables (replaces CHORDCODE_TPL_* env vars) ----------------
 
-    @patch.dict(os.environ, {"CHORDCODE_TPL_TEAM": "backend"})
-    def test_env_variable(self):
-        result = render_prompt("team={{team}}")
+    def test_template_variable(self):
+        result = render_prompt("team={{team}}", template_variables={"team": "backend"})
         self.assertEqual(result, "team=backend")
 
-    @patch.dict(os.environ, {"CHORDCODE_TPL_PROJECT": "myproj"})
-    def test_env_variable_case_insensitive(self):
-        result = render_prompt("p={{project}}")
+    def test_template_variable_case_sensitive(self):
+        result = render_prompt("p={{project}}", template_variables={"project": "myproj"})
         self.assertEqual(result, "p=myproj")
 
-    @patch.dict(os.environ, {"CHORDCODE_TPL_": "empty"})
-    def test_env_empty_suffix_ignored(self):
-        # CHORDCODE_TPL_ with no suffix should be ignored
+    def test_empty_braces_not_matched(self):
+        # {{}} should not be matched by regex (requires \w+)
         result = render_prompt("x={{}}.")
         self.assertEqual(result, "x={{}}.")
 
@@ -130,10 +125,10 @@ class TestRenderPrompt(unittest.TestCase):
         )
         self.assertEqual(result, "m=claude-3")
 
-    @patch.dict(os.environ, {"CHORDCODE_TPL_FOO": "from_env"})
-    def test_extra_variables_override_env(self):
+    def test_extra_variables_override_template_variables(self):
         result = render_prompt(
             "f={{foo}}",
+            template_variables={"foo": "from_config"},
             extra_variables={"foo": "from_caller"},
         )
         self.assertEqual(result, "f=from_caller")

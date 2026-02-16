@@ -1,0 +1,341 @@
+/* ============ Settings Panel ============ */
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Header with tabs */
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+
+.settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  padding: 10px 16px 10px 0;
+  border-right: 1px solid var(--border);
+  margin-right: 0;
+}
+
+.settings-tab {
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.settings-tab:hover {
+  color: var(--fg);
+}
+
+.settings-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.settings-refresh-btn {
+  margin-left: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.settings-refresh-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* Tab content area */
+.settings-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+/* Visual mode — config sections */
+.settings-visual {
+  max-width: 800px;
+}
+
+.settings-section {
+  margin-bottom: 24px;
+}
+
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+.settings-field:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-field-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-key {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.settings-field-badges {
+  display: flex;
+  gap: 4px;
+}
+
+.settings-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.settings-badge.sensitive {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+.settings-badge.overridden {
+  background: rgba(56, 139, 253, 0.15);
+  color: #58a6ff;
+}
+
+.settings-field-desc {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.settings-field-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  padding: 4px 8px;
+  background: var(--surface);
+  border-radius: 4px;
+  margin-top: 4px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.settings-field-value.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Raw YAML mode */
+.settings-raw {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 12px;
+}
+
+.settings-raw-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-scope-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.settings-scope-btn {
+  padding: 6px 16px;
+  font-size: 12px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-scope-btn:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+
+.settings-scope-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.settings-save-btn {
+  margin-left: auto;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.settings-save-btn:hover {
+  opacity: 0.9;
+}
+
+.settings-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-editor {
+  flex: 1;
+  width: 100%;
+  min-height: 400px;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  resize: vertical;
+  tab-size: 2;
+}
+
+.settings-editor:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Config sources display */
+.settings-sources {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-sources-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.settings-source-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--surface);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.settings-source-scope {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
+.settings-source-path {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-source-status {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.settings-source-status.loaded {
+  color: #3fb950;
+}
+
+.settings-source-status.missing {
+  color: var(--muted);
+}
+
+/* Save result feedback */
+.settings-save-result {
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.settings-save-result.success {
+  background: rgba(46, 160, 67, 0.15);
+  color: #3fb950;
+}
+
+.settings-save-result.error {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+/* Empty / loading state */
+.settings-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  color: var(--muted);
+  font-size: 13px;
+}

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -20,20 +19,9 @@ class LoggingTests(unittest.TestCase):
         lines = [line for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
         return [json.loads(line) for line in lines]
 
-    @staticmethod
-    def _configure_env(tmp: str) -> None:
-        os.environ["CHORDCODE_LOG_DIR"] = tmp
-        os.environ["CHORDCODE_LOG_CONSOLE"] = "false"
-        os.environ["CHORDCODE_LOG_FILE"] = "true"
-        os.environ["CHORDCODE_LOG_LEVEL"] = "DEBUG"
-        os.environ["CHORDCODE_LOG_ROTATION"] = "00:00"
-        os.environ["CHORDCODE_LOG_RETENTION"] = "7 days"
-
     def test_jsonl_has_stable_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._configure_env(tmp)
-
-            init_logging(force=True)
+            init_logging(level="DEBUG", console=False, file=True, log_dir=tmp, force=True)
             try:
                 logger.info("hello", event="test.event", session_id="s1", message_id="m1")
             finally:
@@ -50,9 +38,7 @@ class LoggingTests(unittest.TestCase):
 
     def test_error_with_exc_info_outputs_exception_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._configure_env(tmp)
-
-            init_logging(force=True)
+            init_logging(level="DEBUG", console=False, file=True, log_dir=tmp, force=True)
             try:
                 try:
                     raise ValueError("boom")
@@ -70,9 +56,7 @@ class LoggingTests(unittest.TestCase):
 
     def test_context_scoped_to_block(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._configure_env(tmp)
-
-            init_logging(force=True)
+            init_logging(level="DEBUG", console=False, file=True, log_dir=tmp, force=True)
             try:
                 with logger.context(session_id="s-ctx", event="ctx.event"):
                     logger.info("inside")
@@ -90,9 +74,7 @@ class LoggingTests(unittest.TestCase):
 
     def test_child_logger_merges_fields_with_context(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._configure_env(tmp)
-
-            init_logging(force=True)
+            init_logging(level="DEBUG", console=False, file=True, log_dir=tmp, force=True)
             try:
                 child = logger.child(agent="worker", component="planner")
                 with child.context(session_id="s-child"):
@@ -108,8 +90,6 @@ class LoggingTests(unittest.TestCase):
 
     def test_context_isolation_across_async_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._configure_env(tmp)
-
             async def emit(sid: str, delay: float) -> None:
                 with logger.context(session_id=sid, event="async.event"):
                     await asyncio.sleep(delay)
@@ -118,7 +98,7 @@ class LoggingTests(unittest.TestCase):
             async def run_all() -> None:
                 await asyncio.gather(emit("s-1", 0.02), emit("s-2", 0.01))
 
-            init_logging(force=True)
+            init_logging(level="DEBUG", console=False, file=True, log_dir=tmp, force=True)
             try:
                 asyncio.run(run_all())
             finally:

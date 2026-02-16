@@ -20,21 +20,36 @@ class SessionManagementApiTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._db_tmp = tempfile.TemporaryDirectory()
         cls._worktree_tmp = tempfile.TemporaryDirectory()
+        cls._config_tmp = tempfile.TemporaryDirectory()
 
-        os.environ["OPENAI_BASE_URL"] = "http://local.test/v1"
-        os.environ["OPENAI_API_KEY"] = "test-key"
-        os.environ["OPENAI_MODEL"] = "test-model"
-        os.environ["LANGFUSE_ENABLED"] = "false"
-        os.environ["CHORDCODE_LOG_CONSOLE"] = "false"
-        os.environ["CHORDCODE_LOG_FILE"] = "false"
-        os.environ["CHORDCODE_DB_PATH"] = str(Path(cls._db_tmp.name) / "test.sqlite3")
+        # Create a temporary config file for the app
+        import yaml
+        config_dir = Path(cls._config_tmp.name) / ".chordcode"
+        config_dir.mkdir(parents=True)
+        config_data = {
+            "openai": {
+                "base_url": "http://local.test/v1",
+                "api_key": "test-key",
+                "model": "test-model",
+            },
+            "langfuse": {"enabled": False},
+            "logging": {"console": False, "file": False},
+            "db_path": str(Path(cls._db_tmp.name) / "test.sqlite3"),
+            "default_worktree": cls._worktree_tmp.name,
+        }
+        (config_dir / "config.yaml").write_text(yaml.dump(config_data))
+
+        # Patch config.load to use our temp config
+        import chordcode.config as _cfg_mod
+        cls._orig_global_paths = _cfg_mod.GLOBAL_CONFIG_PATHS
+        _cfg_mod.GLOBAL_CONFIG_PATHS = (str(config_dir / "config.yaml"),)
 
         if "chordcode.api.app" in sys.modules:
             del sys.modules["chordcode.api.app"]
         api_app = importlib.import_module("chordcode.api.app")
         cls.client = TestClient(api_app.app)
         cls.client.__enter__()
-        cls.db_path = os.environ["CHORDCODE_DB_PATH"]
+        cls.db_path = str(Path(cls._db_tmp.name) / "test.sqlite3")
         cls.worktree = cls._worktree_tmp.name
 
     @classmethod
@@ -42,6 +57,10 @@ class SessionManagementApiTests(unittest.TestCase):
         cls.client.__exit__(None, None, None)
         cls._db_tmp.cleanup()
         cls._worktree_tmp.cleanup()
+        cls._config_tmp.cleanup()
+        # Restore global config paths
+        import chordcode.config as _cfg_mod
+        _cfg_mod.GLOBAL_CONFIG_PATHS = cls._orig_global_paths
 
     def setUp(self) -> None:
         self._clear_all_tables()

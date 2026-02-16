@@ -30,9 +30,10 @@
 - 权限系统（ask/allow/deny + approvals 持久化）：`src/chordcode/permission/service.py`
 - 事件总线（进程内 pub/sub）+ SSE：`src/chordcode/bus/bus.py`、`/events`
 - SQLite 持久化：`src/chordcode/store/sqlite.py`
-- 工具（当前：bash/read/write/skill/todowrite）与 registry：`src/chordcode/tools/*`
+- 工具（当前：bash/read/write/skill/todowrite/websearch/webfetch）与 registry：`src/chordcode/tools/*`
 - MCP 客户端（发现配置、管理连接、暴露 MCP 工具给 LLM）：`src/chordcode/mcp/*`
 - Hooks（用于在关键生命周期点做可插拔改写/观测）：`src/chordcode/hooks.py`、`src/chordcode/hookdefs.py`
+- YAML 配置系统（全局 + 项目级深度合并、字段元数据注册、Settings UI）：`src/chordcode/config.py`、`src/chordcode/config_schema.py`
 - Langfuse（可选）：`docs/langfuse.md`、`src/chordcode/observability/*`
 
 **注意**
@@ -52,7 +53,10 @@
 
 **启动**
 ```bash
-cp .env.example .env
+# 首次：复制示例配置并填入必填项
+cp config.yaml.example ~/.chordcode/config.yaml
+# 编辑 ~/.chordcode/config.yaml，填入 openai.base_url / api_key / model
+
 uv sync
 uv run uvicorn chordcode.api.app:app --reload --port 4096
 ```
@@ -60,24 +64,37 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 **访问**
 - Web UI：`http://127.0.0.1:4096/`
 
-## 4. 配置（.env）
+## 4. 配置（YAML）
 
-模板：`.env.example`
+配置采用 YAML 文件（也支持 JSON），按优先级从低到高依次加载并深度合并：
+1. 内置默认值
+2. 全局：`~/.chordcode/config.yaml`（或 `.json`）
+3. 项目级：`{worktree}/.chordcode/config.yaml`（或 `.json`）——覆盖同名字段
+
+模板：`config.yaml.example`
 
 **必需（OpenAI-compatible Chat Completions）**
-- `OPENAI_BASE_URL`
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL`
+- `openai.base_url`
+- `openai.api_key`
+- `openai.model`
 
 **可选**
-- `CHORDCODE_SYSTEM_PROMPT`：全局 system prompt
-- `CHORDCODE_DB_PATH`：SQLite 路径（默认 `./data/chordcode.sqlite3`）
-- `CHORDCODE_DEFAULT_WORKTREE`：默认 worktree（未填会自动探测 git worktree）
-- `CHORDCODE_HOOK_DEBUG=1`：输出 hooks 调试日志
-- `CHORDCODE_DEFAULT_PERMISSION_ACTION=ask|allow|deny`：创建 session 时的默认权限策略（推荐默认 `ask`；本地快速测试可临时用 `allow`）
+- `system_prompt`：全局 system prompt（空则加载 `prompts/default.txt`）
+- `db_path`：SQLite 路径（默认 `./data/chordcode.sqlite3`）
+- `default_worktree`：默认 worktree（空则自动探测 git root）
+- `default_permission_action`：`ask` | `allow` | `deny`（推荐 `ask`）
+- `hooks.debug`：输出 hooks 调试日志
+- `logging.*`：日志级别/输出/目录/轮转/保留
+- `web_search.tavily_api_key`：Tavily 搜索 API key
+- `prompt_templates`：自定义模板变量（`{{key}}` 形式注入 system prompt）
 
 **Langfuse（可选）**
-- 见 `docs/langfuse.md`；如果不配置 key，则等价于关闭追踪（代码会降级运行）。
+- 见 `docs/langfuse.md`；`langfuse.*` 字段控制追踪行为。
+
+**Settings UI**
+- Web UI Activity Bar 中点击齿轮图标进入 Settings 面板
+- Visual 标签页：只读查看所有配置字段及说明
+- Raw YAML 标签页：直接编辑项目/全局配置文件并保存（保存后需重启生效）
 
 **MCP 服务器配置（可选）**
 - 在以下路径放置 `mcp.json`（后者覆盖前者同名 server）：
@@ -88,14 +105,16 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 
 ## 5. 关键代码入口（建议从这里读）
 
-- `src/chordcode/api/app.py`：HTTP API、SSE、web 静态文件挂载、run/interrupt 端点、组装工具上下文
+- `src/chordcode/api/app.py`：HTTP API、SSE、web 静态文件挂载、run/interrupt 端点、Config API（7 个端点）、组装工具上下文
 - `src/chordcode/loop/session_loop.py`：核心编排（LLM 流式、tool_calls、permission gate、落库、发事件、中断）
-- `src/chordcode/model.py`：Message/Part/Permission 等 Pydantic 模型（前后端对齐的“协议层”）
-- `src/chordcode/tools/`：工具实现（bash/read/write/skill/todowrite）+ path 限制/截断 + registry
+- `src/chordcode/config.py`：YAML/JSON 配置加载、深度合并、验证、序列化（`Config` 及子 dataclass）
+- `src/chordcode/config_schema.py`：配置字段元数据注册（key/description/default/sensitive/choices），供 Settings UI 与默认值生成使用
+- `src/chordcode/model.py`：Message/Part/Permission 等 Pydantic 模型（前后端对齐的"协议层"）
+- `src/chordcode/tools/`：工具实现（bash/read/write/skill/todowrite/websearch/webfetch）+ path 限制/截断 + registry
 - `src/chordcode/mcp/`：MCP 客户端支持（config 加载、server 连接管理、tool adapter）
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
-- `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板）
+- `web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板、Settings 面板）
 - `docs/project.md`：本项目当前架构/数据流/API/事件结构（强烈建议先看）
 - `CHANGES.md`：版本间改动点与决策背景
 
@@ -105,7 +124,7 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 - **事件驱动优先**：UI/CLI 的状态靠 SSE 订阅事件，而不是轮询/塞私货状态。
 - **变更要“协议先行”**：若改 Part/Message/事件结构，先改 `model.py`，再同步 `session_loop.py` + `api/app.py` + `web/app.js`。
 - `src/chord_code.egg-info/` 属于构建产物；一般不需要手改（如需清理，用构建/打包流程处理）。
-- 不要提交 `.env`（包含密钥）。
+- 不要提交包含密钥的配置文件（`~/.chordcode/config.yaml` 中的 `api_key` 等 sensitive 字段）。`.env` 已弃用，项目不再读取环境变量作为配置。
 
 ## 6.1 Agent 开发指南（务必遵守）
 
@@ -123,13 +142,11 @@ uv run uvicorn chordcode.api.app:app --reload --port 4096
 
 ## 7. 测试与验证
 
-当前测试主要覆盖 hooks/loop 的关键行为：`tests/test_hooks.py`
+测试覆盖：hooks/loop、logging、permission、prompt template、web tools、skills、API 端点等。
 
 ```bash
-uv run python -m unittest discover -s tests -q
+uv run python -m pytest tests/ -v
 ```
-
-（如后续引入 pytest，再补充统一测试入口。）
 
 ## 8. 常见改动路径（给 Agent 的“导航”）
 
@@ -157,6 +174,13 @@ uv run python -m unittest discover -s tests -q
 1. 在 `src/chordcode/hookdefs.py` 添加 hook 名与 input/output schema
 2. 在调用点（通常 `session_loop.py` / `api/app.py` / `permission/service.py`）触发 `hooks.trigger(...)`
 3. 补充 `tests/test_hooks.py` 覆盖行为
+
+**新增/修改一个配置字段**
+1. 在 `src/chordcode/config_schema.py` 中注册字段元数据（`_r(...)` 调用）
+2. 在 `src/chordcode/config.py` 的对应 dataclass 中添加字段，并在 `_build_config()` 中解析
+3. 在消费处（`api/app.py`、`session_loop.py` 等）读取 `cfg.xxx`
+4. 更新 `config.yaml.example`；如为新增 section，更新 `CLAUDE.md` 第 4 节
+5. Settings UI 自动从 `/config/schema` 获取字段元数据，无需额外改前端
 
 **改事件结构 / 前端展示**
 1. 先改 `src/chordcode/model.py` / 事件发布处
@@ -187,9 +211,10 @@ uv run python -m unittest discover -s tests -q
 - `refs/nanobot/`：nanobot（超轻量个人 AI Assistant）。用于参考“最小但可用”的工程组织方式，重点关注：agent loop ↔ tools、配置/CLI、bus/路由、skills loader、subagent/后台任务与 cron 思路。
 - `refs/learn-claude-code/`：learn-claude-code（从零构建 Agent 的教学项目）。用于补齐“Agent 模式方法论”，重点关注：核心循环、显式规划（Todo）、子任务（Subagent/Task）、按需知识注入（Skills）——与本仓库计划补齐的 `todo/task/skill` 工具强相关。
 
-## 10. 工程化建设清单（优先做“让 Agent 更好用”）
+## 10. 工程化建设清单（优先做"让 Agent 更好用"）
 
-- 日志：统一 logging（服务端、loop、tools、permission），支持 `CHORDCODE_LOG_LEVEL`/输出到文件（便于回放问题）。
+- ~~日志：统一 logging~~ ✓ 已完成。通过 `logging.*` YAML 配置控制级别/输出/目录/轮转/保留。
+- ~~配置系统~~ ✓ 已完成。YAML + JSON 文件配置、全局/项目级合并、Config API、Settings UI。
 - 运行脚本：提供 `scripts/`（dev/run/test/format/lint/doctor）统一入口，减少每次手动拼命令。
 - CLI 调试工具：可以一键 `create session -> send message -> run -> stream events -> reply permissions`，用于快速回归与对比不同 LLM/provider 的行为。
-- 固化“验收动作”：为每个新增工具/协议变更提供可重复的 CLI/脚本验证路径（比只靠浏览器点点点更可靠）。
+- 固化"验收动作"：为每个新增工具/协议变更提供可重复的 CLI/脚本验证路径（比只靠浏览器点点点更可靠）。

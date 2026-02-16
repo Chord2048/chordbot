@@ -11,7 +11,7 @@ import httpx
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from chordcode.tools.web import TavilySearchTool, WebFetchTool
+from chordcode.tools.web import TavilySearchTool, WebFetchTool, WebSearchCtx
 
 
 @dataclass
@@ -86,7 +86,7 @@ class WebToolsTests(unittest.IsolatedAsyncioTestCase):
         fake_client = _FakeAsyncClient(response=response, recorder=recorder)
 
         with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}, clear=False):
-            tool = TavilySearchTool()
+            tool = TavilySearchTool(WebSearchCtx(tavily_api_key="tvly-test"))
 
         ctx = FakeToolCtx()
         with patch("chordcode.tools.web.httpx.AsyncClient", return_value=fake_client):
@@ -103,8 +103,7 @@ class WebToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.metadata.get("result_count"), 1)
 
     async def test_websearch_requires_api_key(self) -> None:
-        with patch.dict(os.environ, {"TAVILY_API_KEY": ""}, clear=False):
-            tool = TavilySearchTool()
+        tool = TavilySearchTool(WebSearchCtx(tavily_api_key=""))
 
         ctx = FakeToolCtx()
         with self.assertRaises(RuntimeError):

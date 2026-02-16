@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from chordcode.bus.bus import Bus
-from chordcode.config import Config, KBConfig, LangfuseConfig, OpenAIConfig, VLMConfig
+from chordcode.config import Config, KBConfig, LangfuseConfig, OpenAIConfig, VLMConfig, LoggingConfig, HooksConfig, WebSearchConfig
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker
 from chordcode.llm.openai_chat import Error as LLMError
@@ -150,10 +150,14 @@ class HookTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 kb=KBConfig(backend="none", base_url="", api_key=""),
                 vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),
+                logging=LoggingConfig(level="INFO", console=True, file=False, dir="./data/logs", rotation="00:00", retention="7 days"),
+                hooks=HooksConfig(debug=False),
+                web_search=WebSearchConfig(tavily_api_key=""),
                 system_prompt="sys",
                 db_path=db,
                 default_worktree="/tmp",
                 default_permission_action="ask",
+                prompt_templates={},
             )
             loop = SessionLoop(
                 cfg=cfg,
@@ -225,10 +229,14 @@ class HookTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 kb=KBConfig(backend="none", base_url="", api_key=""),
                 vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),
+                logging=LoggingConfig(level="INFO", console=True, file=False, dir="./data/logs", rotation="00:00", retention="7 days"),
+                hooks=HooksConfig(debug=False),
+                web_search=WebSearchConfig(tavily_api_key=""),
                 system_prompt="sys",
                 db_path=db,
                 default_worktree="/tmp",
                 default_permission_action="ask",
+                prompt_templates={},
             )
             loop = SessionLoop(
                 cfg=cfg,

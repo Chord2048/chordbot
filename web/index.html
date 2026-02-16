@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="/static/styles/parts.css">
   <link rel="stylesheet" href="/static/styles/observability.css">
   <link rel="stylesheet" href="/static/styles/knowledge.css">
+  <link rel="stylesheet" href="/static/styles/settings.css">
 
   <!-- Preact & HTM (UMD builds) -->
   <script src="https://unpkg.com/preact@10.19.3/dist/preact.umd.js"></script>
@@ -235,6 +236,16 @@
 
       // KB state
       const [kbConfig, setKbConfig] = useState(null);
+
+      // Settings state
+      const [settingsConfig, setSettingsConfig] = useState(null);
+      const [settingsSchema, setSettingsSchema] = useState(null);
+      const [settingsSources, setSettingsSources] = useState(null);
+      const [settingsRawProject, setSettingsRawProject] = useState('');
+      const [settingsRawGlobal, setSettingsRawGlobal] = useState('');
+      const [settingsLoaded, setSettingsLoaded] = useState(false);
+      const [settingsError, setSettingsError] = useState('');
+
       // Resizable panels
       const sidebar = useResizable(260, { min: 180, max: 500, side: 'left', storageKey: 'cc_sidebar_w' });
       const observability = useResizable(320, { min: 200, max: 600, side: 'right', storageKey: 'cc_obs_w' });
@@ -639,14 +650,58 @@
         if (panel === 'knowledge' && kbConfig === null) {
           api('/kb/config').then(cfg => setKbConfig(cfg)).catch(() => setKbConfig({ enabled: false }));
         }
+        if (panel === 'settings' && !settingsLoaded) {
+          setSettingsError('');
+          Promise.all([
+            api('/config'),
+            api('/config/schema'),
+            api('/config/sources'),
+            api('/config/raw?scope=project').catch(() => ({ content: '', exists: false })),
+            api('/config/raw?scope=global').catch(() => ({ content: '', exists: false })),
+          ]).then(([cfg, schema, sources, rawProject, rawGlobal]) => {
+            setSettingsConfig(cfg);
+            setSettingsSchema(schema);
+            setSettingsSources(sources.sources || []);
+            setSettingsRawProject(rawProject.content || '');
+            setSettingsRawGlobal(rawGlobal.content || '');
+            setSettingsLoaded(true);
+          }).catch(e => {
+            setSettingsError('Failed to load settings: ' + e.message);
+            setSettingsLoaded(true);
+          });
+        }
+      }
+
+      function refreshSettings() {
+        setSettingsLoaded(false);
+        setSettingsError('');
+        Promise.all([
+          api('/config'),
+          api('/config/schema'),
+          api('/config/sources'),
+          api('/config/raw?scope=project').catch(() => ({ content: '', exists: false })),
+          api('/config/raw?scope=global').catch(() => ({ content: '', exists: false })),
+        ]).then(([cfg, schema, sources, rawProject, rawGlobal]) => {
+          setSettingsConfig(cfg);
+          setSettingsSchema(schema);
+          setSettingsSources(sources.sources || []);
+          setSettingsRawProject(rawProject.content || '');
+          setSettingsRawGlobal(rawGlobal.content || '');
+          setSettingsLoaded(true);
+        }).catch(e => {
+          setSettingsError('Failed to load settings: ' + e.message);
+          setSettingsLoaded(true);
+        });
       }
 
       const activeSession = sessions.find(s => s.id === activeSessionId);
 
       // Build dynamic grid-template-columns based on resize state
       const isKnowledgeMode = activeSidePanel === 'knowledge';
+      const isSettingsMode = activeSidePanel === 'settings';
+      const isFullPageMode = isKnowledgeMode || isSettingsMode;
       const obsW = observabilityCollapsed ? '48px' : observability.width + 'px';
-      const gridStyle = isKnowledgeMode
+      const gridStyle = isFullPageMode
         ? 'grid-template-columns: 48px 1fr'
         : 'grid-template-columns: 48px ' + sidebar.width + 'px 1fr ' + obsW;
 
@@ -666,7 +721,18 @@
             active=${activeSidePanel}
             onChange=${handleSidePanelChange}
           />
-          ${isKnowledgeMode ? html`
+          ${isSettingsMode ? html`
+            <${SettingsPanel}
+              config=${settingsConfig}
+              schema=${settingsSchema}
+              sources=${settingsSources}
+              rawProject=${settingsRawProject}
+              rawGlobal=${settingsRawGlobal}
+              loaded=${settingsLoaded}
+              error=${settingsError}
+              onRefresh=${refreshSettings}
+            />
+          ` : isKnowledgeMode ? html`
             <${KnowledgePanel} config=${kbConfig} />
           ` : html`
             <${SidePanel}
@@ -778,6 +844,7 @@
         { id: 'mcp', icon: '\u{1F50C}', label: 'MCP' },
         { id: 'skills', icon: '\u{1F9E0}', label: 'Skills' },
         { id: 'knowledge', icon: '\u{1F4DA}', label: 'Knowledge' },
+        { id: 'settings', icon: '\u2699\uFE0F', label: 'Settings' },
       ];
       return html`
         <nav class="activity-bar">
@@ -1268,6 +1335,163 @@
               `;
             })}
           </div>
+        </div>
+      `;
+    }
+
+    // ============ SettingsPanel ============
+    function SettingsPanel({ config, schema, sources, rawProject, rawGlobal, loaded, error, onRefresh }) {
+      const [activeTab, setActiveTab] = useState('visual');
+      const [rawScope, setRawScope] = useState('project');
+      const [editorContent, setEditorContent] = useState('');
+      const [saveResult, setSaveResult] = useState(null);
+      const [saving, setSaving] = useState(false);
+
+      // Sync editor content when scope or raw data changes
+      useEffect(() => {
+        setEditorContent(rawScope === 'project' ? (rawProject || '') : (rawGlobal || ''));
+        setSaveResult(null);
+      }, [rawScope, rawProject, rawGlobal]);
+
+      if (!loaded) {
+        return html`<div class="settings-panel"><div class="settings-loading">Loading settings...</div></div>`;
+      }
+
+      if (error) {
+        return html`<div class="settings-panel"><div class="settings-loading" style="color: #f85149;">${error}</div></div>`;
+      }
+
+      function groupFieldsBySection(schemaObj) {
+        const groups = {};
+        for (const [key, meta] of Object.entries(schemaObj || {})) {
+          const parts = key.split('.');
+          const section = parts.length > 1 ? parts[0] : 'general';
+          if (!groups[section]) groups[section] = [];
+          groups[section].push({ ...meta, key });
+        }
+        return groups;
+      }
+
+      function getConfigValue(cfg, key) {
+        const parts = key.split('.');
+        let cur = cfg;
+        for (const p of parts) {
+          if (cur == null || typeof cur !== 'object') return undefined;
+          cur = cur[p];
+        }
+        return cur;
+      }
+
+      function formatValue(v) {
+        if (v === null || v === undefined) return '';
+        if (typeof v === 'object') return JSON.stringify(v, null, 2);
+        return String(v);
+      }
+
+      async function handleSave() {
+        setSaving(true);
+        setSaveResult(null);
+        try {
+          await api('/config/raw', {
+            method: 'PUT',
+            body: JSON.stringify({ scope: rawScope, content: editorContent }),
+          });
+          setSaveResult({ type: 'success', message: 'Saved. Restart required to apply changes.' });
+          onRefresh();
+        } catch (e) {
+          setSaveResult({ type: 'error', message: e.message || 'Save failed' });
+        }
+        setSaving(false);
+      }
+
+      const sections = groupFieldsBySection(schema);
+
+      return html`
+        <div class="settings-panel">
+          <div class="settings-header">
+            <span class="settings-title">Settings</span>
+            <button class="settings-tab ${activeTab === 'visual' ? 'active' : ''}" onClick=${() => setActiveTab('visual')}>Visual</button>
+            <button class="settings-tab ${activeTab === 'raw' ? 'active' : ''}" onClick=${() => setActiveTab('raw')}>Raw YAML</button>
+            <button class="settings-refresh-btn" onClick=${onRefresh}>Refresh</button>
+          </div>
+
+          ${activeTab === 'visual' ? html`
+            <div class="settings-tab-content">
+              <div class="settings-visual">
+                ${Object.entries(sections).map(([section, fields]) => html`
+                  <div class="settings-section" key=${section}>
+                    <div class="settings-section-title">${section}</div>
+                    ${fields.map(field => {
+                      const value = getConfigValue(config, field.key);
+                      const displayVal = formatValue(value);
+                      const isEmpty = value === '' || value === null || value === undefined;
+                      return html`
+                        <div class="settings-field" key=${field.key}>
+                          <div class="settings-field-header">
+                            <span class="settings-field-key">${field.key}</span>
+                            <div class="settings-field-badges">
+                              ${field.sensitive && html`<span class="settings-badge sensitive">sensitive</span>`}
+                            </div>
+                          </div>
+                          <div class="settings-field-desc">
+                            ${field.description}
+                            ${field.choices ? html` <span style="opacity:0.7">(${field.choices.join(' | ')})</span>` : ''}
+                          </div>
+                          <div class="settings-field-value ${isEmpty ? 'empty' : ''}">${isEmpty ? '(not set)' : displayVal}</div>
+                        </div>
+                      `;
+                    })}
+                  </div>
+                `)}
+
+                ${sources && sources.length > 0 && html`
+                  <${ConfigSources} sources=${sources} />
+                `}
+              </div>
+            </div>
+          ` : html`
+            <div class="settings-tab-content">
+              <div class="settings-raw">
+                <div class="settings-raw-toolbar">
+                  <div class="settings-scope-toggle">
+                    <button class="settings-scope-btn ${rawScope === 'project' ? 'active' : ''}" onClick=${() => setRawScope('project')}>Project</button>
+                    <button class="settings-scope-btn ${rawScope === 'global' ? 'active' : ''}" onClick=${() => setRawScope('global')}>Global</button>
+                  </div>
+                  <button class="settings-save-btn" onClick=${handleSave} disabled=${saving}>${saving ? 'Saving...' : 'Save'}</button>
+                </div>
+                ${saveResult && html`
+                  <div class="settings-save-result ${saveResult.type}">${saveResult.message}</div>
+                `}
+                <textarea
+                  class="settings-editor"
+                  value=${editorContent}
+                  onInput=${e => { setEditorContent(e.target.value); setSaveResult(null); }}
+                  spellcheck="false"
+                  placeholder="# No config file found. Edit and save to create one."
+                />
+                ${sources && sources.length > 0 && html`
+                  <${ConfigSources} sources=${sources} />
+                `}
+              </div>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    function ConfigSources({ sources }) {
+      return html`
+        <div class="settings-sources">
+          <div class="settings-sources-title">Config file chain</div>
+          ${sources.map(s => html`
+            <div class="settings-source-item" key=${s.path}>
+              <span class="settings-source-scope">${s.scope}</span>
+              <span class="settings-source-path" title=${s.path}>${s.path}</span>
+              <span class="settings-source-status ${s.loaded ? 'loaded' : 'missing'}">
+                ${s.loaded ? 'loaded' : s.exists ? 'empty' : 'not found'}
+              </span>
+            </div>
+          `)}
         </div>
       `;
     }

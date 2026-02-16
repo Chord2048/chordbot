@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from html import unescape
@@ -45,7 +44,9 @@ class TavilySearchTool:
     description = "Search the web using Tavily with a focused set of high-signal parameters."
 
     def __init__(self, ctx: WebSearchCtx | None = None) -> None:
-        self._ctx = ctx or WebSearchCtx(tavily_api_key=os.environ.get("TAVILY_API_KEY", ""))
+        if ctx is None:
+            raise RuntimeError("WebSearchCtx is required for TavilySearchTool")
+        self._ctx = ctx
 
     def schema(self) -> dict[str, Any]:
         return {

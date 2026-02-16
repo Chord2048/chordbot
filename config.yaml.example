@@ -1,0 +1,69 @@
+# ============================================================
+# Chord Code — config.yaml.example
+# Copy to ~/.chordcode/config.yaml (global) or
+# {worktree}/.chordcode/config.yaml (project-level, overrides global).
+# ============================================================
+
+# --- OpenAI-compatible LLM endpoint (required) ---
+openai:
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "REPLACE_ME"
+  model: "deepseek-chat"
+
+# --- Global system prompt (empty = load from prompts/default.txt) ---
+# system_prompt: "You are a helpful coding agent."
+
+# --- Data paths ---
+db_path: "./data/chordcode.sqlite3"
+# default_worktree: "/abs/path/to/worktree"   # empty = auto-detect git root
+
+# --- Permission default (ask | allow | deny) ---
+# Use `allow` only for fast local testing.
+default_permission_action: "ask"
+
+# --- Logging ---
+logging:
+  level: "INFO"            # DEBUG | INFO | WARNING | ERROR
+  console: true
+  file: true
+  dir: "./data/logs"
+  rotation: "00:00"        # Loguru rotation syntax
+  retention: "7 days"      # Loguru retention syntax
+
+# --- Langfuse tracing (optional) ---
+langfuse:
+  enabled: true
+  public_key: ""
+  secret_key: ""
+  base_url: "https://cloud.langfuse.com"
+  environment: "development"
+  sample_rate: 1.0
+  debug: false
+
+# --- Knowledge Base (optional — empty base_url = disabled) ---
+kb:
+  backend: "lightrag"      # lightrag | none
+  base_url: ""
+  api_key: ""
+
+# --- VLM Document Parser (optional) ---
+vlm:
+  backend: "none"          # paddleocr | none
+  api_url: ""
+  api_key: ""
+  poll_interval: 5
+  timeout: 1800
+
+# --- Hooks ---
+hooks:
+  debug: false
+
+# --- Web Search ---
+web_search:
+  tavily_api_key: ""
+
+# --- Prompt template variables (optional) ---
+# Custom variables available as {{key}} in system prompt.
+# prompt_templates:
+#   team: "backend"
+#   project: "my-project"

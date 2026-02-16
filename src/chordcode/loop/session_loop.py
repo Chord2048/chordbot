@@ -271,6 +271,7 @@ class SessionLoop:
                         "model": self._cfg.openai.model,
                         "agent": agent,
                     },
+                    template_variables=self._cfg.prompt_templates,
                 )
                 if self._hooks:
                     sysout: dict[str, object] = {"system": [system]}

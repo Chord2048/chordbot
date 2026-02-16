@@ -7,6 +7,7 @@ src/chord_code.egg-info/requires.txt
 src/chord_code.egg-info/top_level.txt
 src/chordcode/__init__.py
 src/chordcode/config.py
+src/chordcode/config_schema.py
 src/chordcode/hookdefs.py
 src/chordcode/hooks.py
 src/chordcode/log.py
@@ -15,11 +16,20 @@ src/chordcode/api/__init__.py
 src/chordcode/api/app.py
 src/chordcode/bus/__init__.py
 src/chordcode/bus/bus.py
+src/chordcode/kb/__init__.py
+src/chordcode/kb/interface.py
+src/chordcode/kb/lightrag_client.py
+src/chordcode/kb/paddleocr_client.py
+src/chordcode/kb/vlm_interface.py
 src/chordcode/llm/__init__.py
 src/chordcode/llm/openai_chat.py
 src/chordcode/loop/__init__.py
 src/chordcode/loop/interrupt.py
 src/chordcode/loop/session_loop.py
+src/chordcode/mcp/__init__.py
+src/chordcode/mcp/client.py
+src/chordcode/mcp/config.py
+src/chordcode/mcp/tool_adapter.py
 src/chordcode/observability/__init__.py
 src/chordcode/observability/langfuse_client.py
 src/chordcode/observability/langfuse_hook.py
@@ -36,6 +46,7 @@ src/chordcode/tools/__init__.py
 src/chordcode/tools/base.py
 src/chordcode/tools/bash.py
 src/chordcode/tools/files.py
+src/chordcode/tools/kb_search.py
 src/chordcode/tools/paths.py
 src/chordcode/tools/registry.py
 src/chordcode/tools/skill.py
@@ -46,6 +57,7 @@ tests/test_history.py
 tests/test_hooks.py
 tests/test_log_view_api.py
 tests/test_logging.py
+tests/test_mcp_config.py
 tests/test_permission_service.py
 tests/test_prompt_template.py
 tests/test_reasoning_content.py

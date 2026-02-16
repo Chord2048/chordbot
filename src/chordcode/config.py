@@ -1,10 +1,28 @@
+"""YAML/JSON file-based configuration with global + project-level merge.
+
+Config discovery order (later wins):
+  1. Built-in defaults (from config_schema.py)
+  2. Global: ~/.chordcode/config.yaml (or .json)
+  3. Project: {worktree}/.chordcode/config.yaml (or .json)
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+import yaml
+
+from chordcode.config_schema import CONFIG_FIELD_META
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class OpenAIConfig:
@@ -41,16 +59,112 @@ class VLMConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    level: str
+    console: bool
+    file: bool
+    dir: str
+    rotation: str
+    retention: str
+
+
+@dataclass(frozen=True)
+class HooksConfig:
+    debug: bool
+
+
+@dataclass(frozen=True)
+class WebSearchConfig:
+    tavily_api_key: str
+
+
+@dataclass(frozen=True)
 class Config:
     openai: OpenAIConfig
     langfuse: LangfuseConfig
     kb: KBConfig
     vlm: VLMConfig
+    logging: LoggingConfig
+    hooks: HooksConfig
+    web_search: WebSearchConfig
     system_prompt: str
     db_path: str
     default_worktree: str
     default_permission_action: Literal["allow", "deny", "ask"]
+    prompt_templates: dict[str, str]
 
+
+# ---------------------------------------------------------------------------
+# File discovery
+# ---------------------------------------------------------------------------
+
+GLOBAL_CONFIG_PATHS = (
+    "~/.chordcode/config.yaml",
+    "~/.chordcode/config.json",
+)
+
+
+def project_config_paths(worktree: str) -> tuple[str, ...]:
+    if not worktree:
+        return ()
+    return (
+        os.path.join(worktree, ".chordcode", "config.yaml"),
+        os.path.join(worktree, ".chordcode", "config.json"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# File I/O
+# ---------------------------------------------------------------------------
+
+def _load_yaml_file(path: str) -> dict[str, Any] | None:
+    """Load a YAML or JSON file defensively. Returns None on any error."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return None
+    try:
+        raw = p.read_text(encoding="utf-8")
+        if not raw.strip():
+            return None
+        if p.suffix == ".json":
+            data = json.loads(raw)
+        else:
+            data = yaml.safe_load(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursive merge; override wins for leaf values."""
+    result = copy.deepcopy(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = copy.deepcopy(v)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Defaults from schema
+# ---------------------------------------------------------------------------
+
+def _defaults_dict() -> dict[str, Any]:
+    """Build a nested dict of defaults from CONFIG_FIELD_META."""
+    d: dict[str, Any] = {}
+    for key, meta in CONFIG_FIELD_META.items():
+        parts = key.split(".")
+        target = d
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = copy.deepcopy(meta.default)
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Build Config from merged dict
+# ---------------------------------------------------------------------------
 
 def _detect_worktree() -> str:
     cwd = Path.cwd().resolve()
@@ -61,86 +175,254 @@ def _detect_worktree() -> str:
 
 
 def _load_default_prompt() -> str:
-    """Load the default system prompt from the prompts directory."""
     prompt_file = Path(__file__).parent / "prompts" / "default.txt"
     if prompt_file.exists():
         return prompt_file.read_text().strip()
     return "You are a helpful coding agent."
 
 
-def load() -> Config:
-    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    model = os.environ.get("OPENAI_MODEL", "").strip()
+def _coerce_bool(v: Any, default: bool) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "y", "on"):
+            return True
+        if s in ("false", "0", "no", "n", "off"):
+            return False
+    return default
+
+
+def _get(d: dict[str, Any], dotted: str, default: Any = None) -> Any:
+    """Get a value from a nested dict by dotted key."""
+    parts = dotted.split(".")
+    cur: Any = d
+    for p in parts:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(p)
+        if cur is None:
+            return default
+    return cur
+
+
+def _build_config(merged: dict[str, Any]) -> Config:
+    """Construct Config from a merged dict, applying defaults and coercion."""
+    g = merged  # short alias
+
+    openai = g.get("openai", {}) or {}
+    base_url = str(openai.get("base_url", "") or "").strip()
+    api_key = str(openai.get("api_key", "") or "").strip()
+    model = str(openai.get("model", "") or "").strip()
 
     if not base_url:
-        raise RuntimeError("OPENAI_BASE_URL is required")
+        raise RuntimeError("openai.base_url is required in config")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required")
+        raise RuntimeError("openai.api_key is required in config")
     if not model:
-        raise RuntimeError("OPENAI_MODEL is required")
+        raise RuntimeError("openai.model is required in config")
 
-    # Langfuse configuration
-    langfuse_enabled_str = os.environ.get("LANGFUSE_ENABLED", "true").strip().lower()
-    langfuse_enabled = langfuse_enabled_str not in ("false", "0", "no")
-    langfuse_public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
-    langfuse_secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
-    langfuse_base_url = os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com").strip()
-    langfuse_environment = os.environ.get("LANGFUSE_TRACING_ENVIRONMENT", "development").strip()
-    
-    langfuse_sample_rate_str = os.environ.get("LANGFUSE_SAMPLE_RATE", "1.0").strip()
+    lf = g.get("langfuse", {}) or {}
+    langfuse_sample_rate_raw = lf.get("sample_rate", 1.0)
     try:
-        langfuse_sample_rate = float(langfuse_sample_rate_str)
+        langfuse_sample_rate = float(langfuse_sample_rate_raw)
         if not 0.0 <= langfuse_sample_rate <= 1.0:
             langfuse_sample_rate = 1.0
-    except ValueError:
+    except (ValueError, TypeError):
         langfuse_sample_rate = 1.0
-    
-    langfuse_debug_str = os.environ.get("LANGFUSE_DEBUG", "false").strip().lower()
-    langfuse_debug = langfuse_debug_str in ("true", "1", "yes")
 
-    # System prompt: prefer env var, fall back to default.txt
-    system_prompt = os.environ.get("CHORDCODE_SYSTEM_PROMPT", "").strip()
+    system_prompt = str(g.get("system_prompt", "") or "").strip()
     if not system_prompt:
         system_prompt = _load_default_prompt()
-    db_path = os.environ.get("CHORDCODE_DB_PATH", "./data/chordcode.sqlite3").strip()
-    default_worktree = os.environ.get("CHORDCODE_DEFAULT_WORKTREE", "").strip()
+
+    db_path = str(g.get("db_path", "./data/chordcode.sqlite3") or "./data/chordcode.sqlite3").strip()
+
+    default_worktree = str(g.get("default_worktree", "") or "").strip()
     default_worktree = default_worktree if default_worktree else _detect_worktree()
     if not os.path.isabs(default_worktree):
         default_worktree = str(Path(default_worktree).resolve())
 
-    default_permission_action_raw = os.environ.get("CHORDCODE_DEFAULT_PERMISSION_ACTION", "ask").strip().lower()
+    dpa_raw = str(g.get("default_permission_action", "ask") or "ask").strip().lower()
     default_permission_action: Literal["allow", "deny", "ask"]
-    if default_permission_action_raw in ("allow", "deny", "ask"):
-        default_permission_action = default_permission_action_raw  # type: ignore[assignment]
+    if dpa_raw in ("allow", "deny", "ask"):
+        default_permission_action = dpa_raw  # type: ignore[assignment]
     else:
         default_permission_action = "ask"
+
+    log = g.get("logging", {}) or {}
+    kb = g.get("kb", {}) or {}
+    vlm = g.get("vlm", {}) or {}
+    hooks = g.get("hooks", {}) or {}
+    ws = g.get("web_search", {}) or {}
+    pt = g.get("prompt_templates", {}) or {}
+    if not isinstance(pt, dict):
+        pt = {}
 
     return Config(
         openai=OpenAIConfig(base_url=base_url, api_key=api_key, model=model),
         langfuse=LangfuseConfig(
-            enabled=langfuse_enabled,
-            public_key=langfuse_public_key,
-            secret_key=langfuse_secret_key,
-            base_url=langfuse_base_url,
-            environment=langfuse_environment,
+            enabled=_coerce_bool(lf.get("enabled", True), True),
+            public_key=str(lf.get("public_key", "") or "").strip(),
+            secret_key=str(lf.get("secret_key", "") or "").strip(),
+            base_url=str(lf.get("base_url", "https://cloud.langfuse.com") or "https://cloud.langfuse.com").strip(),
+            environment=str(lf.get("environment", "development") or "development").strip(),
             sample_rate=langfuse_sample_rate,
-            debug=langfuse_debug,
+            debug=_coerce_bool(lf.get("debug", False), False),
         ),
         kb=KBConfig(
-            backend=os.environ.get("CHORDCODE_KB_BACKEND", "lightrag").strip(),
-            base_url=os.environ.get("CHORDCODE_KB_BASE_URL", "").strip(),
-            api_key=os.environ.get("CHORDCODE_KB_API_KEY", "").strip(),
+            backend=str(kb.get("backend", "lightrag") or "lightrag").strip(),
+            base_url=str(kb.get("base_url", "") or "").strip(),
+            api_key=str(kb.get("api_key", "") or "").strip(),
         ),
         vlm=VLMConfig(
-            backend=os.environ.get("CHORDCODE_KB_VLM_BACKEND", "none").strip(),
-            api_url=os.environ.get("CHORDCODE_KB_VLM_API_URL", "").strip(),
-            api_key=os.environ.get("CHORDCODE_KB_VLM_API_KEY", "").strip(),
-            poll_interval=int(os.environ.get("CHORDCODE_KB_VLM_POLL_INTERVAL", "5").strip()),
-            timeout=int(os.environ.get("CHORDCODE_KB_VLM_TIMEOUT", "1800").strip()),
+            backend=str(vlm.get("backend", "none") or "none").strip(),
+            api_url=str(vlm.get("api_url", "") or "").strip(),
+            api_key=str(vlm.get("api_key", "") or "").strip(),
+            poll_interval=int(vlm.get("poll_interval", 5) or 5),
+            timeout=int(vlm.get("timeout", 1800) or 1800),
+        ),
+        logging=LoggingConfig(
+            level=str(log.get("level", "INFO") or "INFO").strip().upper(),
+            console=_coerce_bool(log.get("console", True), True),
+            file=_coerce_bool(log.get("file", True), True),
+            dir=str(log.get("dir", "./data/logs") or "./data/logs").strip(),
+            rotation=str(log.get("rotation", "00:00") or "00:00").strip(),
+            retention=str(log.get("retention", "7 days") or "7 days").strip(),
+        ),
+        hooks=HooksConfig(debug=_coerce_bool(hooks.get("debug", False), False)),
+        web_search=WebSearchConfig(
+            tavily_api_key=str(ws.get("tavily_api_key", "") or "").strip(),
         ),
         system_prompt=system_prompt,
         db_path=db_path,
         default_worktree=default_worktree,
         default_permission_action=default_permission_action,
+        prompt_templates={str(k): str(v) for k, v in pt.items()},
     )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def load(worktree_hint: str = "") -> Config:
+    """Scan global + project config files, merge, and build Config."""
+    merged = _defaults_dict()
+
+    for path in GLOBAL_CONFIG_PATHS:
+        data = _load_yaml_file(path)
+        if data:
+            merged = _deep_merge(merged, data)
+
+    # Determine worktree: use hint, or whatever merged dict has, or auto-detect
+    wt = worktree_hint or str(merged.get("default_worktree", "") or "").strip() or _detect_worktree()
+    for path in project_config_paths(wt):
+        data = _load_yaml_file(path)
+        if data:
+            merged = _deep_merge(merged, data)
+
+    return _build_config(merged)
+
+
+def config_to_dict(cfg: Config) -> dict[str, Any]:
+    """Serialize Config back to a plain dict."""
+    from dataclasses import asdict
+    return asdict(cfg)
+
+
+def mask_sensitive(d: dict[str, Any]) -> dict[str, Any]:
+    """Replace sensitive values with '***' based on CONFIG_FIELD_META."""
+    result = copy.deepcopy(d)
+    for key, meta in CONFIG_FIELD_META.items():
+        if not meta.sensitive:
+            continue
+        parts = key.split(".")
+        target = result
+        for part in parts[:-1]:
+            if not isinstance(target, dict) or part not in target:
+                break
+            target = target[part]
+        else:
+            leaf = parts[-1]
+            if isinstance(target, dict) and leaf in target and target[leaf]:
+                target[leaf] = "***"
+    return result
+
+
+def save_config(data: dict[str, Any], path: str) -> None:
+    """Write a dict as YAML to the given path, creating parent dirs."""
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def generate_default_yaml() -> str:
+    """Generate a commented YAML string from CONFIG_FIELD_META."""
+    lines: list[str] = ["# Chord Code configuration", "# See config.yaml.example for full reference", ""]
+    current_section = ""
+    for key, meta in CONFIG_FIELD_META.items():
+        parts = key.split(".")
+        if len(parts) > 1 and parts[0] != current_section:
+            current_section = parts[0]
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append(f"# --- {current_section} ---")
+
+        desc = f"# {meta.description}"
+        if meta.choices:
+            desc += f" ({' | '.join(meta.choices)})"
+        if meta.sensitive:
+            desc += " [sensitive]"
+        lines.append(desc)
+
+        # Build the key path
+        if len(parts) == 1:
+            val = _format_yaml_value(meta.default)
+            lines.append(f"{parts[0]}: {val}")
+        elif len(parts) == 2:
+            # We group under section headers
+            val = _format_yaml_value(meta.default)
+            lines.append(f"# {parts[0]}.{parts[1]}: {val}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_yaml_value(v: Any) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        if not v:
+            return '""'
+        return f'"{v}"'
+    if isinstance(v, dict):
+        return "{}"
+    return str(v)
+
+
+def get_config_sources(worktree: str = "") -> list[dict[str, Any]]:
+    """List discovered config file paths with exists/loaded status."""
+    wt = worktree or _detect_worktree()
+    sources: list[dict[str, Any]] = []
+
+    for path in GLOBAL_CONFIG_PATHS:
+        p = Path(path).expanduser()
+        data = _load_yaml_file(path)
+        sources.append({
+            "path": str(p),
+            "scope": "global",
+            "exists": p.is_file(),
+            "loaded": data is not None,
+        })
+
+    for path in project_config_paths(wt):
+        p = Path(path)
+        data = _load_yaml_file(path)
+        sources.append({
+            "path": str(p),
+            "scope": "project",
+            "exists": p.is_file(),
+            "loaded": data is not None,
+        })
+
+    return sources

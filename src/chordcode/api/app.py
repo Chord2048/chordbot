@@ -15,7 +15,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from chordcode.bus.bus import Bus, Event
-from chordcode.config import load
+from chordcode.config import load, config_to_dict, mask_sensitive, save_config, generate_default_yaml, get_config_sources, project_config_paths, GLOBAL_CONFIG_PATHS, _load_yaml_file, _deep_merge
+from chordcode.config_schema import CONFIG_FIELD_META
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker, loghook
 from chordcode.llm.openai_chat import OpenAIChatProvider
@@ -35,21 +36,25 @@ from chordcode.tools.files import FileCtx, ReadTool, WriteTool
 from chordcode.tools.skill import SkillCtx, SkillTool
 from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
-from chordcode.tools.web import TavilySearchTool, WebFetchTool
+from chordcode.tools.web import TavilySearchTool, WebFetchTool, WebSearchCtx
 from chordcode.tools.kb_search import KBSearchCtx, KBSearchTool
 from chordcode.mcp import MCPManager, MCPToolAdapter, load_mcp_configs, MCPServerConfig
 from chordcode.skills.loader import SkillLoader
 
-from dotenv import load_dotenv
-load_dotenv(".env", override=True)
-
 cfg = load()
-init_logging()
+init_logging(
+    level=cfg.logging.level,
+    console=cfg.logging.console,
+    file=cfg.logging.file,
+    log_dir=cfg.logging.dir,
+    rotation=cfg.logging.rotation,
+    retention=cfg.logging.retention,
+)
 logger.info("Chord Code starting", event="app.start", model=cfg.openai.model, openai_base_url=cfg.openai.base_url)
 bus = Bus()
 store = SQLiteStore(cfg.db_path)
 hooks = Hooker()
-lh = loghook()
+lh = loghook(cfg=cfg)
 if lh:
     hooks.add(lh)
 
@@ -144,11 +149,120 @@ async def home():
 
 @app.get("/config")
 async def get_config():
-    return {"default_worktree": cfg.default_worktree}
+    return mask_sensitive(config_to_dict(cfg))
+
+
+@app.get("/config/schema")
+async def get_config_schema():
+    """Return field metadata for the Settings UI."""
+    return {
+        key: {
+            "key": meta.key,
+            "description": meta.description,
+            "default": meta.default,
+            "sensitive": meta.sensitive,
+            "choices": meta.choices,
+            "type": meta.type_name,
+        }
+        for key, meta in CONFIG_FIELD_META.items()
+    }
+
+
+@app.get("/config/sources")
+async def get_config_sources_endpoint():
+    return {"sources": get_config_sources(cfg.default_worktree)}
+
+
+@app.get("/config/raw")
+async def get_config_raw(scope: str = "project"):
+    if scope not in ("project", "global"):
+        raise HTTPException(status_code=400, detail="scope must be 'project' or 'global'")
+
+    if scope == "global":
+        paths = [Path(p).expanduser() for p in GLOBAL_CONFIG_PATHS]
+    else:
+        paths = [Path(p) for p in project_config_paths(cfg.default_worktree)]
+
+    for p in paths:
+        if p.is_file():
+            return {"scope": scope, "path": str(p), "content": p.read_text(encoding="utf-8"), "exists": True}
+
+    # No file found — return empty
+    preferred = str(paths[0]) if paths else ""
+    return {"scope": scope, "path": preferred, "content": "", "exists": False}
+
+
+@app.put("/config/raw")
+async def put_config_raw(body: dict[str, Any]):
+    scope = body.get("scope", "project")
+    content = body.get("content", "")
+    if scope not in ("project", "global"):
+        raise HTTPException(status_code=400, detail="scope must be 'project' or 'global'")
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="content must be a string")
+
+    # Validate YAML syntax
+    try:
+        import yaml as _yaml
+        parsed = _yaml.safe_load(content)
+        if content.strip() and not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="YAML must be a mapping (dict)")
+    except _yaml.YAMLError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+
+    if scope == "global":
+        path = Path(GLOBAL_CONFIG_PATHS[0]).expanduser()
+    else:
+        paths = project_config_paths(cfg.default_worktree)
+        path = Path(paths[0]) if paths else None
+        if not path:
+            raise HTTPException(status_code=400, detail="No project worktree configured")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {"ok": True, "path": str(path), "restart_required": True}
+
+
+@app.patch("/config")
+async def patch_config(body: dict[str, Any]):
+    """Partial update: merge into existing project config file."""
+    paths = project_config_paths(cfg.default_worktree)
+    if not paths:
+        raise HTTPException(status_code=400, detail="No project worktree configured")
+
+    config_path = paths[0]  # prefer YAML
+    existing = _load_yaml_file(config_path) or {}
+    merged = _deep_merge(existing, body)
+    save_config(merged, config_path)
+    return {"ok": True, "path": config_path, "restart_required": True}
+
+
+@app.post("/config/init")
+async def init_config(body: dict[str, Any]):
+    """Generate a default config file at the specified scope."""
+    scope = body.get("scope", "project")
+    if scope not in ("project", "global"):
+        raise HTTPException(status_code=400, detail="scope must be 'project' or 'global'")
+
+    if scope == "global":
+        path = Path(GLOBAL_CONFIG_PATHS[0]).expanduser()
+    else:
+        paths = project_config_paths(cfg.default_worktree)
+        if not paths:
+            raise HTTPException(status_code=400, detail="No project worktree configured")
+        path = Path(paths[0])
+
+    if path.is_file():
+        raise HTTPException(status_code=409, detail=f"Config file already exists: {path}")
+
+    content = generate_default_yaml()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {"ok": True, "path": str(path)}
 
 
 def _resolve_log_dir() -> Path:
-    raw = os.environ.get("CHORDCODE_LOG_DIR", "./data/logs").strip() or "./data/logs"
+    raw = cfg.logging.dir or "./data/logs"
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
@@ -382,7 +496,7 @@ async def run_session(session_id: str):
         BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
         ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
         WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-        TavilySearchTool(),
+        TavilySearchTool(WebSearchCtx(tavily_api_key=cfg.web_search.tavily_api_key)),
         WebFetchTool(),
         SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
         TodoWriteTool(store=store, bus=bus),

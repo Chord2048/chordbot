@@ -1,7 +1,7 @@
 """Prompt template rendering with {{variable}} syntax.
 
 Supports built-in variables (date/time/os/etc.), session context,
-CHORDCODE_TPL_* environment variables, and caller-provided overrides.
+config-defined template variables, and caller-provided overrides.
 Unknown variables are preserved as-is for safe degradation.
 """
 
@@ -16,9 +16,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
-
-# Prefix for user-defined template variables in environment
-_ENV_PREFIX = "CHORDCODE_TPL_"
 
 
 def _builtin_variables() -> dict[str, str]:
@@ -48,27 +45,18 @@ def _builtin_variables() -> dict[str, str]:
     }
 
 
-def _env_variables() -> dict[str, str]:
-    """Collect user-defined variables from CHORDCODE_TPL_* env vars."""
-    prefix_len = len(_ENV_PREFIX)
-    return {
-        k[prefix_len:].lower(): v
-        for k, v in os.environ.items()
-        if k.startswith(_ENV_PREFIX) and len(k) > prefix_len
-    }
-
-
 def render_prompt(
     template: str,
     *,
     session_context: dict[str, Any] | None = None,
     extra_variables: dict[str, Any] | None = None,
+    template_variables: dict[str, str] | None = None,
 ) -> str:
     """Render a prompt template by substituting ``{{variable}}`` placeholders.
 
     Variable resolution order (later wins):
       1. Built-in variables (date, time, os, etc.)
-      2. CHORDCODE_TPL_* environment variables
+      2. ``template_variables`` (from config prompt_templates)
       3. ``session_context`` (session_id, cwd, worktree, model, agent, …)
       4. ``extra_variables`` (caller-provided explicit overrides)
 
@@ -78,7 +66,8 @@ def render_prompt(
         return template
 
     variables: dict[str, str] = _builtin_variables()
-    variables.update(_env_variables())
+    if template_variables:
+        variables.update({k: str(v) for k, v in template_variables.items() if v is not None})
     if session_context:
         variables.update({k: str(v) for k, v in session_context.items() if v is not None})
     if extra_variables:
