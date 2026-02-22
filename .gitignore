@@ -15,4 +15,6 @@ node_modules/
 /playwright/.cache/
 /playwright/.auth/
 
+# refs
+refs/
 .chordcode/

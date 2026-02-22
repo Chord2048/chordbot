@@ -33,6 +33,7 @@ from chordcode.permission.service import PermissionService
 from chordcode.store.sqlite import SQLiteStore
 from chordcode.tools.bash import BashCtx, BashTool
 from chordcode.tools.files import FileCtx, ReadTool, WriteTool
+from chordcode.tools.grep import GlobTool, GrepTool, SearchCtx
 from chordcode.tools.skill import SkillCtx, SkillTool
 from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
@@ -494,6 +495,8 @@ async def run_session(session_id: str):
     builtin_tools = [
         BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
         ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+        GlobTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
+        GrepTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
         WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
         TavilySearchTool(WebSearchCtx(tavily_api_key=cfg.web_search.tavily_api_key)),
         WebFetchTool(),

@@ -10,6 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from chordcode.tools.bash import BashCtx, BashTool
 from chordcode.tools.files import FileCtx, ReadTool, WriteTool
+from chordcode.tools.grep import GlobTool, GrepTool, SearchCtx
 
 
 @dataclass
@@ -100,3 +101,51 @@ class ToolPermissionTests(unittest.IsolatedAsyncioTestCase):
             perms = [a["permission"] for a in ctx.asks]
             self.assertIn("bash", perms)
             self.assertIn("external_directory", perms)
+
+    async def test_glob_requests_glob_permission_and_returns_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as worktree:
+            (Path(worktree) / "a.py").write_text("print('a')\n", encoding="utf-8")
+            (Path(worktree) / "sub").mkdir()
+            (Path(worktree) / "sub" / "b.py").write_text("print('b')\n", encoding="utf-8")
+            (Path(worktree) / "sub" / "c.txt").write_text("c\n", encoding="utf-8")
+
+            tool = GlobTool(SearchCtx(worktree=worktree, cwd=worktree))
+            ctx = FakeToolCtx()
+            out = await tool.execute({"pattern": "*.py"}, ctx)
+
+            self.assertIn("a.py", out.output)
+            self.assertIn("b.py", out.output)
+            self.assertEqual(len(ctx.asks), 1)
+            self.assertEqual(ctx.asks[0]["permission"], "glob")
+            self.assertEqual(ctx.asks[0]["patterns"], ["*.py"])
+
+    async def test_glob_requests_external_directory_then_glob_when_outside_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as worktree, tempfile.TemporaryDirectory() as other:
+            (Path(other) / "x.py").write_text("x\n", encoding="utf-8")
+            tool = GlobTool(SearchCtx(worktree=worktree, cwd=worktree))
+            ctx = FakeToolCtx()
+            await tool.execute({"pattern": "*.py", "path": other}, ctx)
+
+            self.assertGreaterEqual(len(ctx.asks), 2)
+            self.assertEqual(ctx.asks[0]["permission"], "external_directory")
+            self.assertEqual(len(ctx.asks[0]["patterns"]), 1)
+            self.assertEqual(Path(ctx.asks[0]["patterns"][0]).resolve(), Path(other).resolve())
+            self.assertEqual(ctx.asks[1]["permission"], "glob")
+
+    async def test_grep_requests_grep_permission_and_respects_include(self) -> None:
+        with tempfile.TemporaryDirectory() as worktree:
+            py_file = Path(worktree) / "main.py"
+            txt_file = Path(worktree) / "notes.txt"
+            py_file.write_text("hello from py\n", encoding="utf-8")
+            txt_file.write_text("hello from txt\n", encoding="utf-8")
+
+            tool = GrepTool(SearchCtx(worktree=worktree, cwd=worktree))
+            ctx = FakeToolCtx()
+            out = await tool.execute({"pattern": "hello", "include": "*.py"}, ctx)
+
+            self.assertIn("Found 1 matches", out.output)
+            self.assertIn(str(py_file.resolve()), out.output)
+            self.assertNotIn(str(txt_file.resolve()), out.output)
+            self.assertEqual(len(ctx.asks), 1)
+            self.assertEqual(ctx.asks[0]["permission"], "grep")
+            self.assertEqual(ctx.asks[0]["patterns"], ["hello"])
