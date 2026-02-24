@@ -148,3 +148,33 @@ class PermissionServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         pending = await self.store.list_pending_permission_requests(self.session_id)
         self.assertEqual(pending, [])
+
+    async def test_channel_source_auto_rejects_permission_ask(self) -> None:
+        asked_iter = self.bus.subscribe("permission.asked")
+        replied_iter = self.bus.subscribe("permission.replied")
+
+        async def do_ask():
+            await self.perm.ask(
+                session_id=self.session_id,
+                ruleset=[PermissionRule(permission="bash", pattern="*", action="ask")],
+                permission="bash",
+                patterns=["git status"],
+                metadata={"source": "channel:feishu"},
+                always=["git*"],
+            )
+
+        ask_task = asyncio.create_task(do_ask())
+        asked = await asyncio.wait_for(asked_iter.__anext__(), timeout=2)
+        replied = await asyncio.wait_for(replied_iter.__anext__(), timeout=2)
+        with self.assertRaises(PermissionRejected):
+            await asyncio.wait_for(ask_task, timeout=2)
+
+        self.assertEqual(asked.type, "permission.asked")
+        self.assertEqual(replied.type, "permission.replied")
+        self.assertEqual(replied.properties.get("reply"), "reject")
+        self.assertEqual(replied.properties.get("reason"), "channel_auto_reject")
+
+        pending = await self.store.list_pending_permission_requests(self.session_id)
+        self.assertEqual(pending, [])
+        await asked_iter.aclose()
+        await replied_iter.aclose()

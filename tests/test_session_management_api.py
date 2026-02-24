@@ -187,3 +187,66 @@ class SessionManagementApiTests(unittest.TestCase):
     def test_delete_missing_session_returns_404(self) -> None:
         res = self.client.delete("/sessions/not-found")
         self.assertEqual(res.status_code, 404)
+
+    def test_channels_status_endpoint(self) -> None:
+        res = self.client.get("/channels/status")
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertIn("enabled_channels", data)
+        self.assertIn("channels", data)
+        self.assertIn("bridge_running", data)
+        self.assertIn("queue", data)
+
+    def test_channels_config_and_manage_endpoints(self) -> None:
+        get_res = self.client.get("/channels/config")
+        self.assertEqual(get_res.status_code, 200, get_res.text)
+        cfg = get_res.json()
+        self.assertIn("channels", cfg)
+        self.assertIn("feishu", cfg["channels"])
+
+        put_res = self.client.put(
+            "/channels/config/feishu",
+            json={
+                "enabled": False,
+                "app_id": "cli_test",
+                "app_secret": "",
+                "encrypt_key": "",
+                "verification_token": "",
+                "allow_from": ["ou_1", "ou_2"],
+                "permission_mode": "commands",
+                "allowed_bash_commands": ["git status", "ls *"],
+            },
+        )
+        self.assertEqual(put_res.status_code, 200, put_res.text)
+        put_data = put_res.json()
+        self.assertTrue(put_data["ok"])
+        self.assertIn("channels", put_data)
+        self.assertIn("feishu", put_data["channels"])
+        self.assertEqual(put_data["channels"]["feishu"]["app_id"], "cli_test")
+        self.assertEqual(put_data["channels"]["feishu"]["allow_from"], ["ou_1", "ou_2"])
+        self.assertEqual(put_data["channels"]["feishu"]["permission_mode"], "commands")
+        self.assertEqual(put_data["channels"]["feishu"]["allowed_bash_commands"], ["git status", "ls *"])
+
+        partial_res = self.client.put(
+            "/channels/config/feishu",
+            json={"permission_mode": "allow"},
+        )
+        self.assertEqual(partial_res.status_code, 200, partial_res.text)
+        partial_data = partial_res.json()
+        self.assertEqual(partial_data["channels"]["feishu"]["permission_mode"], "allow")
+        self.assertEqual(partial_data["channels"]["feishu"]["app_id"], "cli_test")
+
+        bad_mode_res = self.client.put(
+            "/channels/config/feishu",
+            json={"permission_mode": "invalid"},
+        )
+        self.assertEqual(bad_mode_res.status_code, 400, bad_mode_res.text)
+
+        connect_res = self.client.post("/channels/feishu/connect")
+        self.assertEqual(connect_res.status_code, 404, connect_res.text)
+
+        disconnect_res = self.client.post("/channels/feishu/disconnect")
+        self.assertEqual(disconnect_res.status_code, 404, disconnect_res.text)
+
+        test_res = self.client.post("/channels/feishu/test")
+        self.assertEqual(test_res.status_code, 404, test_res.text)

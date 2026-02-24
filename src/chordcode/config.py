@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,6 +40,23 @@ class LangfuseConfig:
     environment: str
     sample_rate: float
     debug: bool
+
+
+@dataclass(frozen=True)
+class FeishuChannelConfig:
+    enabled: bool
+    app_id: str
+    app_secret: str
+    encrypt_key: str
+    verification_token: str
+    allow_from: list[str]
+    permission_mode: Literal["deny", "allow", "commands"] = "deny"
+    allowed_bash_commands: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ChannelsConfig:
+    feishu: FeishuChannelConfig
 
 
 @dataclass(frozen=True)
@@ -82,6 +99,7 @@ class WebSearchConfig:
 class Config:
     openai: OpenAIConfig
     langfuse: LangfuseConfig
+    channels: ChannelsConfig
     kb: KBConfig
     vlm: VLMConfig
     logging: LoggingConfig
@@ -193,6 +211,21 @@ def _coerce_bool(v: Any, default: bool) -> bool:
     return default
 
 
+def _coerce_str_list(v: Any) -> list[str]:
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        items: list[str] = []
+        text = v.replace("\r", "\n")
+        for line in text.split("\n"):
+            for token in line.split(","):
+                s = token.strip()
+                if s:
+                    items.append(s)
+        return items
+    return []
+
+
 def _get(d: dict[str, Any], dotted: str, default: Any = None) -> Any:
     """Get a value from a nested dict by dotted key."""
     parts = dotted.split(".")
@@ -250,6 +283,17 @@ def _build_config(merged: dict[str, Any]) -> Config:
         default_permission_action = "ask"
 
     log = g.get("logging", {}) or {}
+    channels = g.get("channels", {}) or {}
+    feishu = channels.get("feishu", {}) or {}
+    feishu_permission_mode_raw = str(
+        feishu.get("permission_mode", feishu.get("permissionMode", "deny")) or "deny"
+    ).strip().lower()
+    feishu_permission_mode: Literal["deny", "allow", "commands"]
+    if feishu_permission_mode_raw in ("deny", "allow", "commands"):
+        feishu_permission_mode = feishu_permission_mode_raw  # type: ignore[assignment]
+    else:
+        feishu_permission_mode = "deny"
+
     kb = g.get("kb", {}) or {}
     vlm = g.get("vlm", {}) or {}
     hooks = g.get("hooks", {}) or {}
@@ -268,6 +312,22 @@ def _build_config(merged: dict[str, Any]) -> Config:
             environment=str(lf.get("environment", "development") or "development").strip(),
             sample_rate=langfuse_sample_rate,
             debug=_coerce_bool(lf.get("debug", False), False),
+        ),
+        channels=ChannelsConfig(
+            feishu=FeishuChannelConfig(
+                enabled=_coerce_bool(feishu.get("enabled", False), False),
+                app_id=str(feishu.get("app_id", feishu.get("appId", "")) or "").strip(),
+                app_secret=str(feishu.get("app_secret", feishu.get("appSecret", "")) or "").strip(),
+                encrypt_key=str(feishu.get("encrypt_key", feishu.get("encryptKey", "")) or "").strip(),
+                verification_token=str(
+                    feishu.get("verification_token", feishu.get("verificationToken", "")) or ""
+                ).strip(),
+                allow_from=_coerce_str_list(feishu.get("allow_from", feishu.get("allowFrom", []))),
+                permission_mode=feishu_permission_mode,
+                allowed_bash_commands=_coerce_str_list(
+                    feishu.get("allowed_bash_commands", feishu.get("allowedBashCommands", []))
+                ),
+            )
         ),
         kb=KBConfig(
             backend=str(kb.get("backend", "lightrag") or "lightrag").strip(),
@@ -383,6 +443,9 @@ def generate_default_yaml() -> str:
             # We group under section headers
             val = _format_yaml_value(meta.default)
             lines.append(f"# {parts[0]}.{parts[1]}: {val}")
+        else:
+            val = _format_yaml_value(meta.default)
+            lines.append(f"# {key}: {val}")
         lines.append("")
 
     return "\n".join(lines)

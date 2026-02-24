@@ -40,6 +40,18 @@ langfuse:
   sample_rate: 1.0
   debug: false
 
+# --- Channel integrations (optional) ---
+channels:
+  feishu:
+    enabled: false
+    app_id: ""
+    app_secret: ""
+    encrypt_key: ""
+    verification_token: ""
+    allow_from: []         # open_id whitelist, empty = allow all
+    permission_mode: "deny"   # deny | allow | commands
+    allowed_bash_commands: [] # fnmatch patterns, used when permission_mode=commands
+
 # --- Knowledge Base (optional — empty base_url = disabled) ---
 kb:
   backend: "lightrag"      # lightrag | none

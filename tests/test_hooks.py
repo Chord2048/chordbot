@@ -9,7 +9,18 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from chordcode.bus.bus import Bus
-from chordcode.config import Config, KBConfig, LangfuseConfig, OpenAIConfig, VLMConfig, LoggingConfig, HooksConfig, WebSearchConfig
+from chordcode.config import (
+    ChannelsConfig,
+    Config,
+    FeishuChannelConfig,
+    HooksConfig,
+    KBConfig,
+    LangfuseConfig,
+    LoggingConfig,
+    OpenAIConfig,
+    VLMConfig,
+    WebSearchConfig,
+)
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker
 from chordcode.llm.openai_chat import Error as LLMError
@@ -148,6 +159,16 @@ class HookTests(unittest.IsolatedAsyncioTestCase):
                     sample_rate=1.0,
                     debug=False,
                 ),
+                channels=ChannelsConfig(
+                    feishu=FeishuChannelConfig(
+                        enabled=False,
+                        app_id="",
+                        app_secret="",
+                        encrypt_key="",
+                        verification_token="",
+                        allow_from=[],
+                    )
+                ),
                 kb=KBConfig(backend="none", base_url="", api_key=""),
                 vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),
                 logging=LoggingConfig(level="INFO", console=True, file=False, dir="./data/logs", rotation="00:00", retention="7 days"),
@@ -226,6 +247,16 @@ class HookTests(unittest.IsolatedAsyncioTestCase):
                     environment="test",
                     sample_rate=1.0,
                     debug=False,
+                ),
+                channels=ChannelsConfig(
+                    feishu=FeishuChannelConfig(
+                        enabled=False,
+                        app_id="",
+                        app_secret="",
+                        encrypt_key="",
+                        verification_token="",
+                        allow_from=[],
+                    )
                 ),
                 kb=KBConfig(backend="none", base_url="", api_key=""),
                 vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),

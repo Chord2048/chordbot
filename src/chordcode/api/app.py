@@ -15,6 +15,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from chordcode.bus.bus import Bus, Event
+from chordcode.channels import ChannelBus, ChannelManager, ChannelSessionBridge
+from chordcode.channels.events import InboundChannelMessage, OutboundChannelMessage
 from chordcode.config import load, config_to_dict, mask_sensitive, save_config, generate_default_yaml, get_config_sources, project_config_paths, GLOBAL_CONFIG_PATHS, _load_yaml_file, _deep_merge
 from chordcode.config_schema import CONFIG_FIELD_META
 from chordcode.hookdefs import Hook
@@ -94,6 +96,11 @@ llm = OpenAIChatProvider(
     langfuse_enabled=cfg.langfuse.enabled,
 )
 interrupt = InterruptManager()
+channel_bus = ChannelBus()
+channel_manager = ChannelManager(cfg, channel_bus)
+channel_bridge: ChannelSessionBridge | None = None
+_session_locks: dict[str, asyncio.Lock] = {}
+_session_locks_guard = asyncio.Lock()
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _LOG_FILE_RE = re.compile(r"^chordcode_(\d{4}-\d{2}-\d{2})\.jsonl$")
@@ -106,12 +113,278 @@ def _default_rules() -> list[PermissionRule]:
     ]
 
 
+def _build_feishu_channel_rules(runtime_cfg: Any) -> list[PermissionRule]:
+    feishu_cfg = runtime_cfg.channels.feishu
+    mode = str(getattr(feishu_cfg, "permission_mode", "deny") or "deny").strip().lower()
+    allowed_cmds = [str(x).strip() for x in (getattr(feishu_cfg, "allowed_bash_commands", []) or []) if str(x).strip()]
+
+    if mode == "allow":
+        return [PermissionRule(permission="*", pattern="*", action="allow")]
+
+    if mode == "commands":
+        rules: list[PermissionRule] = [
+            PermissionRule(permission="bash", pattern=cmd, action="allow")
+            for cmd in allowed_cmds
+        ]
+        rules.append(PermissionRule(permission="*", pattern="*", action="deny"))
+        return rules
+
+    return [PermissionRule(permission="*", pattern="*", action="deny")]
+
+
+def _same_rules(a: list[PermissionRule], b: list[PermissionRule]) -> bool:
+    return [r.model_dump() for r in a] == [r.model_dump() for r in b]
+
+
 async def _get_session_or_404(session_id: str) -> Session:
     try:
         return await store.get_session(session_id)
     except KeyError as e:
         detail = str(e.args[0]) if e.args else "session not found"
         raise HTTPException(status_code=404, detail=detail)
+
+
+async def _get_session_lock(session_id: str) -> asyncio.Lock:
+    async with _session_locks_guard:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _session_locks[session_id] = lock
+        return lock
+
+
+async def _add_user_message(session: Session, text: str, *, source: str = "api") -> str:
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="text is required")
+
+    now = int(time.time() * 1000)
+    msg = Message(
+        id=str(uuid4()),
+        session_id=session.id,
+        role="user",
+        parent_id=None,
+        agent="primary",
+        model=ModelRef(provider="openai-compatible", id=cfg.openai.model),
+        created_at=now,
+    )
+    out: dict[str, object] = {"text": text}
+    await hooks.trigger(Hook.ChatMessage, {"session_id": session.id, "agent": msg.agent, "message_id": msg.id}, out)
+    text = str(out.get("text") or text)
+
+    await store.add_message(msg)
+    text_part = TextPart(id=str(uuid4()), message_id=msg.id, session_id=session.id, text=text)
+    await store.add_part(session.id, msg.id, text_part)
+    await store.touch_session(session.id)
+
+    await bus.publish(Event(type="message.updated", properties={"session_id": session.id, "info": msg.model_dump()}))
+    await bus.publish(
+        Event(
+            type="message.part.updated",
+            properties={"session_id": session.id, "message_id": msg.id, "part": text_part.model_dump(), "delta": text},
+        ),
+    )
+    logger.info(
+        "User message stored",
+        event="message.user.added",
+        session_id=session.id,
+        message_id=msg.id,
+        source=source,
+        content_chars=len(text),
+    )
+    return msg.id
+
+
+async def _build_tools(session: Session) -> ToolRegistry:
+    builtin_tools = [
+        BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
+        ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+        GlobTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
+        GrepTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
+        WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+        TavilySearchTool(WebSearchCtx(tavily_api_key=cfg.web_search.tavily_api_key)),
+        WebFetchTool(),
+        SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
+        TodoWriteTool(store=store, bus=bus),
+    ]
+
+    if kb_client is not None:
+        builtin_tools.append(KBSearchTool(KBSearchCtx(kb=kb_client)))
+
+    mcp_tool_infos = await mcp_manager.list_tools()
+    mcp_tools = [MCPToolAdapter(info, mcp_manager) for info in mcp_tool_infos]
+    return ToolRegistry(builtin_tools + mcp_tools)
+
+
+async def _run_agent_once(session: Session, *, source: str = "api") -> tuple[str, str | None]:
+    lock = await _get_session_lock(session.id)
+    async with lock:
+        tools = await _build_tools(session)
+        loop = SessionLoop(cfg=cfg, bus=bus, store=store, perm=perm, tools=tools, llm=llm, interrupt=interrupt, hooks=hooks)
+        logger.info("Running session loop", event="session.run.requested", session_id=session.id, source=source)
+        return await loop.run(session_id=session.id, source=source)
+
+
+async def _extract_assistant_text(session_id: str, message_id: str) -> str:
+    history = await store.list_messages(session_id)
+    target = next((m for m in history if m.info.id == message_id), None)
+    if not target:
+        return ""
+    chunks: list[str] = []
+    for part in target.parts:
+        if getattr(part, "type", None) == "text":
+            text = getattr(part, "text", "")
+            if text:
+                chunks.append(text)
+    return "".join(chunks).strip()
+
+
+async def _resolve_or_create_channel_session(msg: InboundChannelMessage) -> Session:
+    runtime_cfg = _load_effective_config()
+    bound_session_id = await store.get_channel_session(msg.channel, msg.chat_id)
+    if bound_session_id:
+        try:
+            session = await store.get_session(bound_session_id)
+            desired_rules = _build_feishu_channel_rules(runtime_cfg)
+            if not _same_rules(session.permission_rules, desired_rules):
+                session = await store.update_session_permission_rules(bound_session_id, desired_rules)
+                logger.info(
+                    "Channel session permission rules synchronized",
+                    event="channel.session.rules.adjusted",
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    session_id=bound_session_id,
+                    permission_mode=runtime_cfg.channels.feishu.permission_mode,
+                )
+            return session
+        except KeyError:
+            logger.warning(
+                "Channel session binding points to missing session; recreating",
+                event="channel.session.binding_stale",
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                session_id=bound_session_id,
+            )
+
+    now = int(time.time() * 1000)
+    title = f"[{msg.channel}] {msg.chat_id}"
+    s = Session(
+        id=str(uuid4()),
+        title=title,
+        worktree=runtime_cfg.default_worktree,
+        cwd=runtime_cfg.default_worktree,
+        created_at=now,
+        updated_at=now,
+        permission_rules=_build_feishu_channel_rules(runtime_cfg),
+    )
+    await store.create_session(s)
+    await store.bind_channel_session(
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        session_id=s.id,
+        sender_id=msg.sender_id,
+    )
+    await bus.publish(Event(type="session.created", properties={"session_id": s.id, "info": s.model_dump()}))
+    logger.info(
+        "Channel session created",
+        event="channel.session.created",
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        sender_id=msg.sender_id,
+        session_id=s.id,
+    )
+    return s
+
+
+async def _process_channel_inbound(msg: InboundChannelMessage) -> OutboundChannelMessage | None:
+    session = await _resolve_or_create_channel_session(msg)
+    text = msg.content.strip()
+    if not text:
+        return None
+
+    await _add_user_message(session, text, source=f"channel:{msg.channel}")
+    assistant_message_id, trace_id = await _run_agent_once(session, source=f"channel:{msg.channel}")
+    content = await _extract_assistant_text(session.id, assistant_message_id)
+    if not content:
+        history = await store.list_messages(session.id)
+        assistant = next((m.info for m in history if m.info.id == assistant_message_id), None)
+        if assistant and assistant.finish == "blocked":
+            content = (
+                "工具调用被权限策略拦截。请在 Channel Config 里调整 permission_mode（allow / commands）并配置可执行命令后重试。"
+            )
+        else:
+            content = "(empty response)"
+
+    metadata: dict[str, Any] = {
+        "session_id": session.id,
+        "assistant_message_id": assistant_message_id,
+        "source": f"channel:{msg.channel}",
+    }
+    if trace_id:
+        metadata["trace_id"] = trace_id
+        metadata["trace_url"] = f"{cfg.langfuse.base_url}/trace/{trace_id}"
+
+    return OutboundChannelMessage(
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        content=content,
+        metadata=metadata,
+    )
+
+
+def _load_effective_config() -> Any:
+    """Load latest merged config from disk (global + project)."""
+    return load(cfg.default_worktree)
+
+
+def _parse_allow_from(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        text = value.replace("\r", "\n")
+        items: list[str] = []
+        for line in text.split("\n"):
+            for token in line.split(","):
+                s = token.strip()
+                if s:
+                    items.append(s)
+        return items
+    return []
+
+
+def _parse_line_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        text = value.replace("\r", "\n")
+        items: list[str] = []
+        for line in text.split("\n"):
+            for token in line.split(","):
+                s = token.strip()
+                if s:
+                    items.append(s)
+        return items
+    return []
+
+
+def _serialize_feishu_config(channel_cfg: Any) -> dict[str, Any]:
+    return {
+        "enabled": bool(channel_cfg.enabled),
+        "app_id": channel_cfg.app_id or "",
+        "app_secret_set": bool(channel_cfg.app_secret),
+        "encrypt_key_set": bool(channel_cfg.encrypt_key),
+        "verification_token_set": bool(channel_cfg.verification_token),
+        "allow_from": list(channel_cfg.allow_from or []),
+        "permission_mode": str(getattr(channel_cfg, "permission_mode", "deny") or "deny"),
+        "allowed_bash_commands": list(getattr(channel_cfg, "allowed_bash_commands", []) or []),
+    }
+
+
+async def _reload_channels_runtime(runtime_cfg: Any) -> None:
+    global channel_manager
+    old_manager = channel_manager
+    await old_manager.stop_all()
+    channel_manager = ChannelManager(runtime_cfg, channel_bus)
+    await channel_manager.start_all()
 
 
 app = FastAPI(title="Chord Code", version="0.1.0")
@@ -122,6 +395,7 @@ app.mount("/static", StaticFiles(directory=str(_web_dir)), name="static")
 
 @app.on_event("startup")
 async def _startup():
+    global channel_bridge
     await store.init()
     await hooks.trigger(Hook.Config, {"config": cfg}, {})
 
@@ -136,10 +410,18 @@ async def _startup():
 
     asyncio.create_task(forward())
 
+    # Start channel adapters and channel->session bridge
+    await channel_manager.start_all()
+    channel_bridge = ChannelSessionBridge(bus=channel_bus, process_inbound=_process_channel_inbound)
+    await channel_bridge.start()
+
 
 @app.on_event("shutdown")
 async def _shutdown():
     """Shutdown handler to flush Langfuse events and close MCP connections."""
+    if channel_bridge:
+        await channel_bridge.stop()
+    await channel_manager.stop_all()
     await mcp_manager.shutdown()
     shutdown_langfuse()
 
@@ -452,69 +734,14 @@ async def delete_session(session_id: str):
 @app.post("/sessions/{session_id}/messages")
 async def add_message(session_id: str, body: AddMessageRequest):
     session = await store.get_session(session_id)
-    text = body.text
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="text is required")
-    now = int(time.time() * 1000)
-    msg = Message(
-        id=str(uuid4()),
-        session_id=session.id,
-        role="user",
-        parent_id=None,
-        agent="primary",
-        model=ModelRef(provider="openai-compatible", id=cfg.openai.model),
-        created_at=now,
-    )
-
-    out: dict[str, object] = {"text": text}
-    await hooks.trigger(Hook.ChatMessage, {"session_id": session.id, "agent": msg.agent, "message_id": msg.id}, out)
-    text = str(out.get("text") or text)
-
-    await store.add_message(msg)
-    text_part = TextPart(
-        id=str(uuid4()),
-        message_id=msg.id,
-        session_id=session.id,
-        text=text,
-    )
-    await store.add_part(session.id, msg.id, text_part)
-    await store.touch_session(session.id)
-    await bus.publish(Event(type="message.updated", properties={"session_id": session.id, "info": msg.model_dump()}))
-    await bus.publish(
-        Event(
-            type="message.part.updated",
-            properties={"session_id": session.id, "message_id": msg.id, "part": text_part.model_dump(), "delta": text},
-        ),
-    )
-    return {"message_id": msg.id}
+    message_id = await _add_user_message(session, body.text, source="api")
+    return {"message_id": message_id}
 
 
 @app.post("/sessions/{session_id}/run")
 async def run_session(session_id: str):
     session = await store.get_session(session_id)
-    builtin_tools = [
-        BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
-        ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-        GlobTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
-        GrepTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
-        WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-        TavilySearchTool(WebSearchCtx(tavily_api_key=cfg.web_search.tavily_api_key)),
-        WebFetchTool(),
-        SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
-        TodoWriteTool(store=store, bus=bus),
-    ]
-
-    # Conditionally register KB search tool
-    if kb_client is not None:
-        builtin_tools.append(KBSearchTool(KBSearchCtx(kb=kb_client)))
-
-    # Inject MCP tools alongside built-in tools
-    mcp_tool_infos = await mcp_manager.list_tools()
-    mcp_tools = [MCPToolAdapter(info, mcp_manager) for info in mcp_tool_infos]
-
-    tools = ToolRegistry(builtin_tools + mcp_tools)
-    loop = SessionLoop(cfg=cfg, bus=bus, store=store, perm=perm, tools=tools, llm=llm, interrupt=interrupt, hooks=hooks)
-    msg_id, trace_id = await loop.run(session_id=session.id)
+    msg_id, trace_id = await _run_agent_once(session, source="api")
     result = {"assistant_message_id": msg_id}
     if trace_id:
         result["trace_id"] = trace_id
@@ -570,6 +797,124 @@ async def events(session_id: str | None = None):
             yield f"data: {json.dumps({'type': e.type, 'properties': e.properties})}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/channels/status")
+async def channels_status():
+    runtime_cfg = _load_effective_config()
+    return {
+        "enabled_channels": channel_manager.enabled_channels,
+        "channels": channel_manager.get_status(),
+        "configured": {
+            "feishu": _serialize_feishu_config(runtime_cfg.channels.feishu),
+        },
+        "bridge_running": bool(channel_bridge and channel_bridge.is_running),
+        "queue": {
+            "inbound": channel_bus.inbound_size,
+            "outbound": channel_bus.outbound_size,
+        },
+    }
+
+
+@app.get("/channels/config")
+async def channels_config():
+    runtime_cfg = _load_effective_config()
+    return {
+        "channels": {
+            "feishu": _serialize_feishu_config(runtime_cfg.channels.feishu),
+        }
+    }
+
+
+@app.put("/channels/config/feishu")
+async def update_feishu_channel_config(body: dict[str, Any]):
+    paths = project_config_paths(cfg.default_worktree)
+    if not paths:
+        raise HTTPException(status_code=400, detail="No project worktree configured")
+
+    existing_cfg = _load_effective_config()
+    existing = _load_yaml_file(paths[0]) or {}
+    existing_feishu = existing_cfg.channels.feishu
+
+    keep_existing_secret = bool(body.get("keep_existing_secret", True))
+    app_secret = str(body.get("app_secret", "") or "").strip()
+    encrypt_key = str(body.get("encrypt_key", "") or "").strip()
+    verification_token = str(body.get("verification_token", "") or "").strip()
+
+    if keep_existing_secret:
+        if not app_secret:
+            app_secret = existing_feishu.app_secret
+        if not encrypt_key:
+            encrypt_key = existing_feishu.encrypt_key
+        if not verification_token:
+            verification_token = existing_feishu.verification_token
+
+    permission_mode_raw = str(
+        body.get("permission_mode", getattr(existing_feishu, "permission_mode", "deny")) or "deny"
+    ).strip().lower()
+    if permission_mode_raw not in ("deny", "allow", "commands"):
+        raise HTTPException(status_code=400, detail="permission_mode must be one of: deny, allow, commands")
+
+    feishu_patch = {
+        "enabled": bool(body.get("enabled", existing_feishu.enabled)),
+        "app_id": str(body.get("app_id", existing_feishu.app_id) or "").strip(),
+        "app_secret": app_secret,
+        "encrypt_key": encrypt_key,
+        "verification_token": verification_token,
+        "allow_from": _parse_allow_from(body.get("allow_from", existing_feishu.allow_from)),
+        "permission_mode": permission_mode_raw,
+        "allowed_bash_commands": _parse_line_list(
+            body.get("allowed_bash_commands", getattr(existing_feishu, "allowed_bash_commands", []))
+        ),
+    }
+
+    merged = _deep_merge(existing, {"channels": {"feishu": feishu_patch}})
+    save_config(merged, paths[0])
+
+    runtime_cfg = _load_effective_config()
+    await _reload_channels_runtime(runtime_cfg)
+    logger.info(
+        "Feishu channel config updated",
+        event="channel.config.updated",
+        channel="feishu",
+        enabled=feishu_patch["enabled"],
+        allow_from_count=len(feishu_patch["allow_from"]),
+        permission_mode=feishu_patch["permission_mode"],
+        allowed_bash_commands_count=len(feishu_patch["allowed_bash_commands"]),
+    )
+    return {
+        "ok": True,
+        "restart_required": False,
+        "channels": {"feishu": _serialize_feishu_config(runtime_cfg.channels.feishu)},
+        "runtime_status": channel_manager.get_status(),
+    }
+
+
+@app.post("/channels/{name}/connect")
+async def connect_channel(name: str):
+    try:
+        await channel_manager.connect_channel(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"channel not found: {name}")
+    return {"ok": True, "channel": name, "status": channel_manager.get_status().get(name, {})}
+
+
+@app.post("/channels/{name}/disconnect")
+async def disconnect_channel(name: str):
+    try:
+        await channel_manager.disconnect_channel(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"channel not found: {name}")
+    return {"ok": True, "channel": name, "status": channel_manager.get_status().get(name, {})}
+
+
+@app.post("/channels/{name}/test")
+async def test_channel(name: str):
+    try:
+        result = await channel_manager.test_channel(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"channel not found: {name}")
+    return result
 
 
 @app.post("/permissions/{request_id}/reply")

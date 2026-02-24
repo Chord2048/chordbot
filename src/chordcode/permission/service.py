@@ -8,6 +8,7 @@ from uuid import uuid4
 from chordcode.bus.bus import Bus, Event
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker
+from chordcode.log import logger
 from chordcode.model import PermissionReply, PermissionRequest, PermissionRule
 from chordcode.permission.rules import evaluate_permission
 from chordcode.store.sqlite import SQLiteStore
@@ -67,6 +68,43 @@ class PermissionService:
                 if status == "deny":
                     raise PermissionRejected(f"permission denied: {permission} {p}")
 
+            source = str(metadata.get("source", "") or "").strip()
+            if source.startswith("channel:"):
+                req = PermissionRequest(
+                    id=str(uuid4()),
+                    session_id=session_id,
+                    permission=permission,
+                    patterns=patterns,
+                    metadata=metadata,
+                    always=always,
+                    tool=tool,
+                )
+                await self._store.create_permission_request(req)
+                await self._bus.publish(Event(type="permission.asked", properties=req.model_dump()))
+                await self._store.resolve_permission_request(req.id, "rejected")
+                await self._bus.publish(
+                    Event(
+                        type="permission.replied",
+                        properties={
+                            "session_id": session_id,
+                            "request_id": req.id,
+                            "reply": "reject",
+                            "reason": "channel_auto_reject",
+                        },
+                    ),
+                )
+                logger.warning(
+                    "Permission ask auto-rejected for channel source",
+                    event="permission.channel.auto_reject",
+                    session_id=session_id,
+                    source=source,
+                    permission=permission,
+                    pattern=p,
+                )
+                raise PermissionRejected(
+                    f"permission requires interactive approval: {permission} {p}; channel source does not support approval flow"
+                )
+
             req = PermissionRequest(
                 id=str(uuid4()),
                 session_id=session_id,
@@ -82,7 +120,13 @@ class PermissionService:
             fut: asyncio.Future[PermissionReply] = asyncio.get_event_loop().create_future()
             async with self._lock:
                 self._pending[req.id] = fut
-            reply = await fut
+            try:
+                reply = await fut
+            finally:
+                async with self._lock:
+                    current = self._pending.get(req.id)
+                    if current is fut:
+                        del self._pending[req.id]
 
             if reply.reply == "reject":
                 await self._store.resolve_permission_request(req.id, "rejected")
@@ -117,4 +161,3 @@ class PermissionService:
             if fut.done():
                 return
             fut.set_result(reply)
-            del self._pending[request_id]

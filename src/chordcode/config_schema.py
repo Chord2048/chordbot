@@ -56,6 +56,25 @@ _r("langfuse.environment", "Langfuse tracing environment tag", "development")
 _r("langfuse.sample_rate", "Trace sample rate (0.0 - 1.0)", 1.0)
 _r("langfuse.debug", "Enable Langfuse debug logging", False)
 
+# --- Channels ---
+_r("channels.feishu.enabled", "Enable Feishu channel adapter", False)
+_r("channels.feishu.app_id", "Feishu app id", "", sensitive=True)
+_r("channels.feishu.app_secret", "Feishu app secret", "", sensitive=True)
+_r("channels.feishu.encrypt_key", "Feishu event encrypt key (optional)", "", sensitive=True)
+_r("channels.feishu.verification_token", "Feishu event verification token (optional)", "", sensitive=True)
+_r("channels.feishu.allow_from", "Allowed Feishu sender open_ids (empty = allow all)", [])
+_r(
+    "channels.feishu.permission_mode",
+    "Permission policy for channel-triggered tool calls",
+    "deny",
+    choices=["deny", "allow", "commands"],
+)
+_r(
+    "channels.feishu.allowed_bash_commands",
+    "Allowed bash command patterns when permission_mode=commands (fnmatch patterns)",
+    [],
+)
+
 # --- Logging ---
 _r("logging.level", "Log level", "INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 _r("logging.console", "Enable console log output", True)

@@ -33,6 +33,22 @@ class SQLiteStore:
             )
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS channel_sessions (
+                  channel TEXT NOT NULL,
+                  chat_id TEXT NOT NULL,
+                  session_id TEXT NOT NULL,
+                  sender_id TEXT,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  PRIMARY KEY (channel, chat_id)
+                )
+                """,
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_channel_sessions_session_id ON channel_sessions(session_id)"
+            )
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS messages (
                   id TEXT PRIMARY KEY,
                   session_id TEXT NOT NULL,
@@ -191,6 +207,18 @@ class SQLiteStore:
             await db.commit()
         return await self.get_session(session_id)
 
+    async def update_session_permission_rules(self, session_id: str, rules: list[PermissionRule]) -> Session:
+        now = int(time.time() * 1000)
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "UPDATE sessions SET permission_rules_json=?, updated_at=? WHERE id=?",
+                (json.dumps([r.model_dump() for r in rules]), now, session_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"session not found: {session_id}")
+            await db.commit()
+        return await self.get_session(session_id)
+
     async def delete_session(self, session_id: str) -> None:
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,))
@@ -200,10 +228,44 @@ class SQLiteStore:
             # Cascade delete related rows owned by the session.
             await db.execute("DELETE FROM parts WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM channel_sessions WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM permission_requests WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM permission_approvals WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM todos WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            await db.commit()
+
+    async def get_channel_session(self, channel: str, chat_id: str) -> str | None:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "SELECT session_id FROM channel_sessions WHERE channel=? AND chat_id=?",
+                (channel, chat_id),
+            )
+            row = await cur.fetchone()
+            return str(row[0]) if row else None
+
+    async def bind_channel_session(
+        self,
+        *,
+        channel: str,
+        chat_id: str,
+        session_id: str,
+        sender_id: str | None = None,
+    ) -> None:
+        now = int(time.time() * 1000)
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                INSERT INTO channel_sessions(channel, chat_id, session_id, sender_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel, chat_id)
+                DO UPDATE SET
+                  session_id=excluded.session_id,
+                  sender_id=excluded.sender_id,
+                  updated_at=excluded.updated_at
+                """,
+                (channel, chat_id, session_id, sender_id, now, now),
+            )
             await db.commit()
 
     async def add_message(self, message: Message) -> None:

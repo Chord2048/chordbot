@@ -10,7 +10,18 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from chordcode.bus.bus import Bus
-from chordcode.config import Config, KBConfig, LangfuseConfig, OpenAIConfig, VLMConfig, LoggingConfig, HooksConfig, WebSearchConfig
+from chordcode.config import (
+    ChannelsConfig,
+    Config,
+    FeishuChannelConfig,
+    HooksConfig,
+    KBConfig,
+    LangfuseConfig,
+    LoggingConfig,
+    OpenAIConfig,
+    VLMConfig,
+    WebSearchConfig,
+)
 from chordcode.hooks import Hooker
 from chordcode.llm.openai_chat import Finish, ReasoningDelta, ToolCall, _extract_reasoning_text
 from chordcode.loop.interrupt import InterruptManager
@@ -109,6 +120,16 @@ class ReasoningToolCallHistoryTests(unittest.IsolatedAsyncioTestCase):
                     environment="test",
                     sample_rate=1.0,
                     debug=False,
+                ),
+                channels=ChannelsConfig(
+                    feishu=FeishuChannelConfig(
+                        enabled=False,
+                        app_id="",
+                        app_secret="",
+                        encrypt_key="",
+                        verification_token="",
+                        allow_from=[],
+                    )
                 ),
                 kb=KBConfig(backend="none", base_url="", api_key=""),
                 vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),

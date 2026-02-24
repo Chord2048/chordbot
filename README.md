@@ -20,6 +20,26 @@ cd chord-code
 uv run uvicorn chordcode.api.app:app --reload --port 4096
 ```
 
+## Channel Integration (Feishu)
+This project now includes a multi-channel adapter mechanism (extensible), with Feishu implemented in this iteration.
+
+Example config:
+```yaml
+channels:
+  feishu:
+    enabled: true
+    app_id: "cli_xxx"
+    app_secret: "xxx"
+    encrypt_key: ""
+    verification_token: ""
+    allow_from: []   # optional whitelist of open_id
+```
+
+Runtime status API:
+```bash
+curl http://127.0.0.1:4096/channels/status
+```
+
 ## Tests
 Run with pytest (recommended):
 ```bash

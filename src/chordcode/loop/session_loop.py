@@ -40,6 +40,7 @@ class ToolCtx:
     session_id: str
     message_id: str
     agent: str
+    source: str
     bus: Bus
     store: SQLiteStore
     perm: PermissionService
@@ -47,13 +48,15 @@ class ToolCtx:
     tool_part_id: str
 
     async def ask(self, *, permission: str, patterns: list[str], always: list[str], metadata: dict[str, Any]) -> None:
+        ask_metadata = dict(metadata)
+        ask_metadata.setdefault("source", self.source)
         await self.perm.ask(
             session_id=self.session_id,
             ruleset=self.ruleset,
             permission=permission,
             patterns=patterns,
             always=always,
-            metadata=metadata,
+            metadata=ask_metadata,
             tool={"message_id": self.message_id, "call_id": self.tool_part_id},
         )
 
@@ -105,7 +108,7 @@ class SessionLoop:
         self._locks[session_id] = l
         return l
 
-    async def run(self, *, session_id: str) -> tuple[str, str | None]:
+    async def run(self, *, session_id: str, source: str = "api") -> tuple[str, str | None]:
         run_log = logger.child(session_id=session_id)
         run_log.debug("Session run requested", event="session.run")
         async with self._lock(session_id):
@@ -125,21 +128,22 @@ class SessionLoop:
                     metadata={
                         "agent": "primary",
                         "session_id": session_id,
+                        "source": source,
                     }
                 ) as trace_span:
                     trace_id = trace_span.trace_id
                     run_log.child(trace_id=trace_id).debug("Langfuse trace started", event="langfuse.trace.start")
-                    return await self._run_session_with_trace(session_id, trace_span, trace_id)
+                    return await self._run_session_with_trace(session_id, trace_span, trace_id, source)
             except Exception as e:
                 logger.error("Error creating Langfuse trace span", event="langfuse.trace.start.error", exc_info=e)
                 # Fall back to running without Langfuse
-                return await self._run_session_with_trace(session_id, None, None)
+                return await self._run_session_with_trace(session_id, None, None, source)
         else:
             # No Langfuse, run without tracing
-            return await self._run_session_with_trace(session_id, None, None)
+            return await self._run_session_with_trace(session_id, None, None, source)
 
     async def _run_session_with_trace(
-        self, session_id: str, trace_span: Any | None, trace_id: str | None
+        self, session_id: str, trace_span: Any | None, trace_id: str | None, source: str
     ) -> tuple[str, str | None]:
         """Helper method that contains the actual session loop logic."""
         agent = "primary"
@@ -652,6 +656,7 @@ class SessionLoop:
                         session_id=session_id,
                         message_id=assistant_id,
                         agent=agent,
+                        source=source,
                         bus=self._bus,
                         store=self._store,
                         perm=self._perm,

@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="/static/styles/observability.css">
   <link rel="stylesheet" href="/static/styles/knowledge.css">
   <link rel="stylesheet" href="/static/styles/settings.css">
+  <link rel="stylesheet" href="/static/styles/channels.css">
 
   <!-- Preact & HTM (UMD builds) -->
   <script src="https://unpkg.com/preact@10.19.3/dist/preact.umd.js"></script>
@@ -699,7 +700,8 @@
       // Build dynamic grid-template-columns based on resize state
       const isKnowledgeMode = activeSidePanel === 'knowledge';
       const isSettingsMode = activeSidePanel === 'settings';
-      const isFullPageMode = isKnowledgeMode || isSettingsMode;
+      const isChannelsMode = activeSidePanel === 'channels';
+      const isFullPageMode = isKnowledgeMode || isSettingsMode || isChannelsMode;
       const obsW = observabilityCollapsed ? '48px' : observability.width + 'px';
       const gridStyle = isFullPageMode
         ? 'grid-template-columns: 48px 1fr'
@@ -732,6 +734,8 @@
               error=${settingsError}
               onRefresh=${refreshSettings}
             />
+          ` : isChannelsMode ? html`
+            <${ChannelsPanel} />
           ` : isKnowledgeMode ? html`
             <${KnowledgePanel} config=${kbConfig} />
           ` : html`
@@ -841,6 +845,7 @@
     function ActivityBar({ active, onChange }) {
       const items = [
         { id: 'chat', icon: '\u{1F4AC}', label: 'Chat' },
+        { id: 'channels', icon: '\u{1F4E1}', label: 'Channels' },
         { id: 'mcp', icon: '\u{1F50C}', label: 'MCP' },
         { id: 'skills', icon: '\u{1F9E0}', label: 'Skills' },
         { id: 'knowledge', icon: '\u{1F4DA}', label: 'Knowledge' },
@@ -1492,6 +1497,360 @@
               </span>
             </div>
           `)}
+        </div>
+      `;
+    }
+
+    // ============ ChannelsPanel ============
+    function ChannelsPanel() {
+      const [loading, setLoading] = useState(true);
+      const [saving, setSaving] = useState(false);
+      const [busy, setBusy] = useState({ connect: false, disconnect: false, test: false });
+      const [error, setError] = useState('');
+      const [saveMsg, setSaveMsg] = useState('');
+      const [statusData, setStatusData] = useState(null);
+      const [configData, setConfigData] = useState(null);
+      const [testResult, setTestResult] = useState(null);
+      const [form, setForm] = useState({
+        enabled: false,
+        app_id: '',
+        app_secret: '',
+        encrypt_key: '',
+        verification_token: '',
+        allow_from_text: '',
+        permission_mode: 'deny',
+        allowed_bash_commands_text: '',
+      });
+
+      async function loadChannelsData() {
+        setLoading(true);
+        setError('');
+        try {
+          const [status, cfg] = await Promise.all([
+            api('/channels/status'),
+            api('/channels/config'),
+          ]);
+          setStatusData(status);
+          setConfigData(cfg);
+
+          const feishu = (cfg.channels && cfg.channels.feishu) || {};
+          setForm(prev => ({
+            ...prev,
+            enabled: Boolean(feishu.enabled),
+            app_id: feishu.app_id || '',
+            app_secret: '',
+            encrypt_key: '',
+            verification_token: '',
+            allow_from_text: (feishu.allow_from || []).join('\n'),
+            permission_mode: feishu.permission_mode || 'deny',
+            allowed_bash_commands_text: (feishu.allowed_bash_commands || []).join('\n'),
+          }));
+        } catch (e) {
+          setError('Failed to load channels: ' + e.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      useEffect(() => {
+        loadChannelsData();
+      }, []);
+
+      function updateField(key, value) {
+        setForm(prev => ({ ...prev, [key]: value }));
+        setSaveMsg('');
+      }
+
+      async function handleSaveConfig(e) {
+        e.preventDefault();
+        setSaving(true);
+        setSaveMsg('');
+        setError('');
+        try {
+          const allowFrom = form.allow_from_text
+            .split('\n')
+            .map(x => x.trim())
+            .filter(Boolean);
+          const allowedBashCommands = form.allowed_bash_commands_text
+            .split('\n')
+            .map(x => x.trim())
+            .filter(Boolean);
+
+          const payload = {
+            enabled: form.enabled,
+            app_id: form.app_id.trim(),
+            app_secret: form.app_secret,
+            encrypt_key: form.encrypt_key,
+            verification_token: form.verification_token,
+            allow_from: allowFrom,
+            permission_mode: form.permission_mode,
+            allowed_bash_commands: allowedBashCommands,
+            keep_existing_secret: true,
+          };
+          const data = await api('/channels/config/feishu', {
+            method: 'PUT',
+            body: JSON.stringify(payload),
+          });
+
+          setConfigData({ channels: data.channels || {} });
+          setStatusData(prev => ({
+            ...(prev || {}),
+            channels: data.runtime_status || ((prev && prev.channels) || {}),
+            enabled_channels: Object.keys(data.runtime_status || {}).filter(k => data.runtime_status[k].enabled),
+          }));
+          setForm(prev => ({
+            ...prev,
+            app_secret: '',
+            encrypt_key: '',
+            verification_token: '',
+          }));
+          setSaveMsg('Saved and applied.');
+        } catch (e) {
+          setError('Failed to save channel config: ' + e.message);
+        } finally {
+          setSaving(false);
+        }
+      }
+
+      async function connectChannel() {
+        setBusy(prev => ({ ...prev, connect: true }));
+        setError('');
+        try {
+          await api('/channels/feishu/connect', { method: 'POST' });
+          await loadChannelsData();
+        } catch (e) {
+          setError('Connect failed: ' + e.message);
+        } finally {
+          setBusy(prev => ({ ...prev, connect: false }));
+        }
+      }
+
+      async function disconnectChannel() {
+        setBusy(prev => ({ ...prev, disconnect: true }));
+        setError('');
+        try {
+          await api('/channels/feishu/disconnect', { method: 'POST' });
+          await loadChannelsData();
+        } catch (e) {
+          setError('Disconnect failed: ' + e.message);
+        } finally {
+          setBusy(prev => ({ ...prev, disconnect: false }));
+        }
+      }
+
+      async function testConnection() {
+        setBusy(prev => ({ ...prev, test: true }));
+        setError('');
+        setTestResult(null);
+        try {
+          const result = await api('/channels/feishu/test', { method: 'POST' });
+          setTestResult(result);
+        } catch (e) {
+          setError('Connection test failed: ' + e.message);
+        } finally {
+          setBusy(prev => ({ ...prev, test: false }));
+        }
+      }
+
+      const feishuCfg = (configData && configData.channels && configData.channels.feishu) || {};
+      const feishuStatus = (statusData && statusData.channels && statusData.channels.feishu) || null;
+      const enabledCount = statusData ? (statusData.enabled_channels || []).length : 0;
+      const runningCount = statusData
+        ? Object.values(statusData.channels || {}).filter(v => v && v.running).length
+        : 0;
+
+      if (loading) {
+        return html`
+          <div class="channels-page">
+            <div class="channels-loading"><span class="spinner"></span> Loading channel dashboard...</div>
+          </div>
+        `;
+      }
+
+      return html`
+        <div class="channels-page">
+          <div class="channels-header">
+            <div>
+              <h2>Channels</h2>
+              <p>Configure and manage IM/Email channel adapters.</p>
+            </div>
+            <button class="btn btn-sm" onClick=${loadChannelsData}>Refresh</button>
+          </div>
+
+          <div class="channels-overview">
+            <div class="channels-stat-card">
+              <div class="channels-stat-label">Enabled Channels</div>
+              <div class="channels-stat-value">${enabledCount}</div>
+            </div>
+            <div class="channels-stat-card">
+              <div class="channels-stat-label">Running Channels</div>
+              <div class="channels-stat-value">${runningCount}</div>
+            </div>
+            <div class="channels-stat-card">
+              <div class="channels-stat-label">Bridge</div>
+              <div class="channels-stat-value">${statusData && statusData.bridge_running ? 'running' : 'stopped'}</div>
+            </div>
+            <div class="channels-stat-card">
+              <div class="channels-stat-label">Queue</div>
+              <div class="channels-stat-value">
+                in ${statusData && statusData.queue ? statusData.queue.inbound : 0} / out ${statusData && statusData.queue ? statusData.queue.outbound : 0}
+              </div>
+            </div>
+          </div>
+
+          ${(error || saveMsg) && html`
+            <div class="channels-banner ${error ? 'error' : 'success'}">
+              ${error || saveMsg}
+            </div>
+          `}
+
+          <div class="channels-grid">
+            <div class="channels-card">
+              <div class="channels-card-header">
+                <h3>Feishu Config</h3>
+                <span class="badge ${form.enabled ? 'badge-success' : ''}">${form.enabled ? 'enabled' : 'disabled'}</span>
+              </div>
+              <form class="channels-form" onSubmit=${handleSaveConfig}>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked=${form.enabled}
+                    onChange=${(e) => updateField('enabled', e.target.checked)}
+                  />
+                  Enable Feishu channel
+                </label>
+                <div class="form-group">
+                  <label>App ID</label>
+                  <input
+                    class="input"
+                    type="text"
+                    value=${form.app_id}
+                    onInput=${(e) => updateField('app_id', e.target.value)}
+                    placeholder="cli_xxx"
+                  />
+                </div>
+                <div class="form-group">
+                  <label>App Secret</label>
+                  <input
+                    class="input"
+                    type="password"
+                    value=${form.app_secret}
+                    onInput=${(e) => updateField('app_secret', e.target.value)}
+                    placeholder=${feishuCfg.app_secret_set ? 'configured (leave blank to keep)' : 'app secret'}
+                  />
+                </div>
+                <div class="form-group">
+                  <label>Encrypt Key</label>
+                  <input
+                    class="input"
+                    type="password"
+                    value=${form.encrypt_key}
+                    onInput=${(e) => updateField('encrypt_key', e.target.value)}
+                    placeholder=${feishuCfg.encrypt_key_set ? 'configured (leave blank to keep)' : 'optional'}
+                  />
+                </div>
+                <div class="form-group">
+                  <label>Verification Token</label>
+                  <input
+                    class="input"
+                    type="password"
+                    value=${form.verification_token}
+                    onInput=${(e) => updateField('verification_token', e.target.value)}
+                    placeholder=${feishuCfg.verification_token_set ? 'configured (leave blank to keep)' : 'optional'}
+                  />
+                </div>
+                <div class="form-group">
+                  <label>Allow From (open_id, one per line)</label>
+                  <textarea
+                    class="channels-textarea"
+                    value=${form.allow_from_text}
+                    onInput=${(e) => updateField('allow_from_text', e.target.value)}
+                    placeholder="ou_xxx"
+                  />
+                </div>
+                <div class="form-group">
+                  <label>Permission Mode</label>
+                  <select
+                    class="input"
+                    value=${form.permission_mode}
+                    onChange=${(e) => updateField('permission_mode', e.target.value)}
+                  >
+                    <option value="deny">Deny all tools (safe default)</option>
+                    <option value="allow">Allow all tools</option>
+                    <option value="commands">Allow only listed bash commands</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Allowed Bash Commands (one fnmatch pattern per line)</label>
+                  <textarea
+                    class="channels-textarea"
+                    value=${form.allowed_bash_commands_text}
+                    onInput=${(e) => updateField('allowed_bash_commands_text', e.target.value)}
+                    placeholder="git status&#10;ls *&#10;pytest tests/test_api.py"
+                    disabled=${form.permission_mode !== 'commands'}
+                  />
+                </div>
+                <div class="form-actions">
+                  <button type="submit" class="btn" disabled=${saving}>
+                    ${saving ? 'Saving...' : 'Save Config'}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div class="channels-card">
+              <div class="channels-card-header">
+                <h3>Feishu Runtime</h3>
+                ${feishuStatus
+                  ? html`<span class="badge ${feishuStatus.running ? 'badge-success' : 'badge-warning'}">
+                    ${feishuStatus.running ? 'running' : 'stopped'}
+                  </span>`
+                  : html`<span class="badge">not initialized</span>`
+                }
+              </div>
+
+              <div class="channels-runtime-row">
+                <span>Configured:</span>
+                <strong>${feishuCfg.enabled ? 'yes' : 'no'}</strong>
+              </div>
+              <div class="channels-runtime-row">
+                <span>App ID:</span>
+                <strong>${feishuCfg.app_id || '-'}</strong>
+              </div>
+              <div class="channels-runtime-row">
+                <span>Allow List:</span>
+                <strong>${(feishuCfg.allow_from || []).length}</strong>
+              </div>
+              <div class="channels-runtime-row">
+                <span>Permission Mode:</span>
+                <strong>${feishuCfg.permission_mode || 'deny'}</strong>
+              </div>
+              <div class="channels-runtime-row">
+                <span>Allowed Bash Patterns:</span>
+                <strong>${(feishuCfg.allowed_bash_commands || []).length}</strong>
+              </div>
+
+              <div class="channels-actions">
+                <button class="btn btn-sm btn-success" onClick=${connectChannel} disabled=${busy.connect}>
+                  ${busy.connect ? 'Connecting...' : 'Connect'}
+                </button>
+                <button class="btn btn-sm btn-danger" onClick=${disconnectChannel} disabled=${busy.disconnect}>
+                  ${busy.disconnect ? 'Disconnecting...' : 'Disconnect'}
+                </button>
+                <button class="btn btn-sm" onClick=${testConnection} disabled=${busy.test}>
+                  ${busy.test ? 'Testing...' : 'Connection Test'}
+                </button>
+              </div>
+
+              ${testResult && html`
+                <div class="channels-test-result ${testResult.ok ? 'success' : 'error'}">
+                  <div class="channels-test-title">${testResult.ok ? 'Test Passed' : 'Test Failed'}</div>
+                  <div class="channels-test-message">${testResult.message || ''}</div>
+                  <pre class="channels-test-raw">${JSON.stringify(testResult, null, 2)}</pre>
+                </div>
+              `}
+            </div>
+          </div>
         </div>
       `;
     }
