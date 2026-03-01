@@ -67,6 +67,8 @@ class SessionManagementApiTests(unittest.TestCase):
 
     def _clear_all_tables(self) -> None:
         with sqlite3.connect(self.db_path) as db:
+            db.execute("DELETE FROM cron_job_runs")
+            db.execute("DELETE FROM cron_jobs")
             db.execute("DELETE FROM parts")
             db.execute("DELETE FROM messages")
             db.execute("DELETE FROM permission_requests")
@@ -158,6 +160,44 @@ class SessionManagementApiTests(unittest.TestCase):
                 """,
                 (session_id, "read", "*", "allow"),
             )
+            db.execute(
+                """
+                INSERT INTO cron_jobs (
+                    id, name, session_id, enabled, schedule_kind, schedule_at_ms, schedule_every_ms, schedule_expr, schedule_tz,
+                    payload_kind, payload_message, next_run_at_ms, last_run_at_ms, last_status, last_error, last_assistant_message_id,
+                    last_trace_id, delete_after_run, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job-1",
+                    "cleanup-test",
+                    session_id,
+                    1,
+                    "every",
+                    None,
+                    60000,
+                    None,
+                    None,
+                    "agent_turn",
+                    "ping",
+                    now + 60000,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO cron_job_runs (job_id, session_id, started_at, finished_at, status)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("job-1", session_id, now, now + 10, "ok"),
+            )
             db.commit()
 
         delete_res = self.client.delete(f"/sessions/{session_id}")
@@ -181,6 +221,8 @@ class SessionManagementApiTests(unittest.TestCase):
             self.assertEqual(count_rows("todos"), 0)
             self.assertEqual(count_rows("permission_requests"), 0)
             self.assertEqual(count_rows("permission_approvals"), 0)
+            self.assertEqual(count_rows("cron_jobs"), 0)
+            self.assertEqual(count_rows("cron_job_runs"), 0)
             cur = db.execute("SELECT COUNT(*) FROM sessions WHERE id=?", (session_id,))
             self.assertEqual(int(cur.fetchone()[0]), 0)
 
@@ -250,3 +292,70 @@ class SessionManagementApiTests(unittest.TestCase):
 
         test_res = self.client.post("/channels/feishu/test")
         self.assertEqual(test_res.status_code, 404, test_res.text)
+
+    def test_cronjobs_crud_endpoints(self) -> None:
+        session = self._create_session("Cron Session")
+
+        create_res = self.client.post(
+            "/cronjobs",
+            json={
+                "name": "Heartbeat",
+                "session_id": session["id"],
+                "message": "please summarize latest progress",
+                "schedule": {"kind": "every", "every_ms": 3600000},
+            },
+        )
+        self.assertEqual(create_res.status_code, 200, create_res.text)
+        job = create_res.json()
+        job_id = job["id"]
+        self.assertEqual(job["name"], "Heartbeat")
+        self.assertEqual(job["session_id"], session["id"])
+        self.assertTrue(job["enabled"])
+        self.assertIsNotNone(job["state"]["next_run_at_ms"])
+
+        list_res = self.client.get("/cronjobs")
+        self.assertEqual(list_res.status_code, 200, list_res.text)
+        jobs = list_res.json()["jobs"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["id"], job_id)
+
+        get_res = self.client.get(f"/cronjobs/{job_id}")
+        self.assertEqual(get_res.status_code, 200, get_res.text)
+        self.assertEqual(get_res.json()["id"], job_id)
+
+        disable_res = self.client.post(f"/cronjobs/{job_id}/enabled", json={"enabled": False})
+        self.assertEqual(disable_res.status_code, 200, disable_res.text)
+        disabled = disable_res.json()
+        self.assertFalse(disabled["enabled"])
+        self.assertIsNone(disabled["state"]["next_run_at_ms"])
+
+        runs_res = self.client.get(f"/cronjobs/{job_id}/runs")
+        self.assertEqual(runs_res.status_code, 200, runs_res.text)
+        self.assertEqual(runs_res.json()["runs"], [])
+
+        delete_res = self.client.delete(f"/cronjobs/{job_id}")
+        self.assertEqual(delete_res.status_code, 200, delete_res.text)
+        self.assertTrue(delete_res.json()["ok"])
+
+        missing_res = self.client.get(f"/cronjobs/{job_id}")
+        self.assertEqual(missing_res.status_code, 404, missing_res.text)
+
+    def test_cronjobs_status_and_validation(self) -> None:
+        status_res = self.client.get("/cronjobs/status")
+        self.assertEqual(status_res.status_code, 200, status_res.text)
+        status = status_res.json()
+        self.assertIn("running", status)
+        self.assertIn("jobs", status)
+        self.assertIn("next_wake_at_ms", status)
+
+        session = self._create_session("Cron Validation")
+        bad_res = self.client.post(
+            "/cronjobs",
+            json={
+                "name": "Bad Cron",
+                "session_id": session["id"],
+                "message": "hello",
+                "schedule": {"kind": "every"},
+            },
+        )
+        self.assertEqual(bad_res.status_code, 400, bad_res.text)

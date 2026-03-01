@@ -32,6 +32,7 @@ src/chordcode/cli/output.py
 src/chordcode/cli/commands/__init__.py
 src/chordcode/cli/commands/agent.py
 src/chordcode/cli/commands/config.py
+src/chordcode/cli/commands/cronjobs.py
 src/chordcode/cli/commands/doctor.py
 src/chordcode/cli/commands/kb.py
 src/chordcode/cli/commands/logs.py
@@ -41,6 +42,8 @@ src/chordcode/cli/commands/run.py
 src/chordcode/cli/commands/serve.py
 src/chordcode/cli/commands/sessions.py
 src/chordcode/cli/commands/skills.py
+src/chordcode/cron/__init__.py
+src/chordcode/cron/service.py
 src/chordcode/kb/__init__.py
 src/chordcode/kb/interface.py
 src/chordcode/kb/lightrag_client.py
@@ -91,6 +94,7 @@ src/chordcode/web/js/state.js
 src/chordcode/web/js/utils/markdown.js
 src/chordcode/web/js/utils/time.js
 src/chordcode/web/styles/base.css
+src/chordcode/web/styles/channels.css
 src/chordcode/web/styles/chat.css
 src/chordcode/web/styles/components.css
 src/chordcode/web/styles/knowledge.css
@@ -100,6 +104,8 @@ src/chordcode/web/styles/parts.css
 src/chordcode/web/styles/settings.css
 src/chordcode/web/styles/sidebar.css
 tests/test_channel_sessions_store.py
+tests/test_cron_service.py
+tests/test_feishu_channel.py
 tests/test_history.py
 tests/test_hooks.py
 tests/test_log_view_api.py

@@ -19,6 +19,7 @@ Requires-Dist: httpx>=0.27
 Requires-Dist: mcp>=1.0
 Requires-Dist: typer>=0.12
 Requires-Dist: rich>=13.0
+Requires-Dist: croniter>=2.0
 
 # Chord Code (Agent Core, MVP)
 
@@ -40,6 +41,26 @@ Run:
 ```bash
 cd chord-code
 uv run uvicorn chordcode.api.app:app --reload --port 4096
+```
+
+## Channel Integration (Feishu)
+This project now includes a multi-channel adapter mechanism (extensible), with Feishu implemented in this iteration.
+
+Example config:
+```yaml
+channels:
+  feishu:
+    enabled: true
+    app_id: "cli_xxx"
+    app_secret: "xxx"
+    encrypt_key: ""
+    verification_token: ""
+    allow_from: []   # optional whitelist of open_id
+```
+
+Runtime status API:
+```bash
+curl http://127.0.0.1:4096/channels/status
 ```
 
 ## Tests

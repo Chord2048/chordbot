@@ -1,5 +1,13 @@
 # CHANGES
 
+## Unreleased
+
+- Added cronjobs capability for scheduled agent wakeups and task execution.
+- Added SQLite persistence for cron jobs and run history (`cron_jobs`, `cron_job_runs`).
+- Added background `CronService` lifecycle integration on API startup/shutdown.
+- Added cronjobs REST API (`/cronjobs`, `/cronjobs/{id}`, enable/disable, run-now, runs, status).
+- Added CLI command group `chordcode cronjobs` for managing scheduled jobs.
+
 ## v0.2.0 — Configuration Migration (BREAKING)
 
 **Breaking change**: All configuration has moved from `.env` / environment variables to **YAML config files**.

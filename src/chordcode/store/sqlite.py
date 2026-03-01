@@ -7,7 +7,20 @@ import aiosqlite
 from typing import Any, Optional
 from pydantic import TypeAdapter
 
-from chordcode.model import Message, MessageWithParts, Part, PermissionRequest, PermissionRule, Session, TodoItem
+from chordcode.model import (
+    CronJob,
+    CronJobRun,
+    CronPayload,
+    CronSchedule,
+    CronJobState,
+    Message,
+    MessageWithParts,
+    Part,
+    PermissionRequest,
+    PermissionRule,
+    Session,
+    TodoItem,
+)
 
 
 class SQLiteStore:
@@ -124,6 +137,53 @@ class SQLiteStore:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id)"
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cron_jobs (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  session_id TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1,
+                  schedule_kind TEXT NOT NULL,
+                  schedule_at_ms INTEGER,
+                  schedule_every_ms INTEGER,
+                  schedule_expr TEXT,
+                  schedule_tz TEXT,
+                  payload_kind TEXT NOT NULL,
+                  payload_message TEXT NOT NULL,
+                  next_run_at_ms INTEGER,
+                  last_run_at_ms INTEGER,
+                  last_status TEXT,
+                  last_error TEXT,
+                  last_assistant_message_id TEXT,
+                  last_trace_id TEXT,
+                  delete_after_run INTEGER NOT NULL DEFAULT 0,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                )
+                """,
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run ON cron_jobs(enabled, next_run_at_ms)"
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cron_job_runs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  job_id TEXT NOT NULL,
+                  session_id TEXT NOT NULL,
+                  started_at INTEGER NOT NULL,
+                  finished_at INTEGER,
+                  status TEXT NOT NULL,
+                  error TEXT,
+                  assistant_message_id TEXT,
+                  trace_id TEXT
+                )
+                """,
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cron_job_runs_job ON cron_job_runs(job_id, started_at DESC)"
+            )
             await db.commit()
 
     async def create_session(self, session: Session) -> None:
@@ -232,6 +292,8 @@ class SQLiteStore:
             await db.execute("DELETE FROM permission_requests WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM permission_approvals WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM todos WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM cron_job_runs WHERE session_id=?", (session_id,))
+            await db.execute("DELETE FROM cron_jobs WHERE session_id=?", (session_id,))
             await db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
             await db.commit()
 
@@ -499,3 +561,277 @@ class SQLiteStore:
                     ),
                 )
             await db.commit()
+
+    # ----- Cron job operations -----
+
+    @staticmethod
+    def _row_to_cron_job(row: tuple[Any, ...]) -> CronJob:
+        return CronJob(
+            id=row[0],
+            name=row[1],
+            session_id=row[2],
+            enabled=bool(row[3]),
+            schedule=CronSchedule(
+                kind=row[4],
+                at_ms=row[5],
+                every_ms=row[6],
+                expr=row[7],
+                tz=row[8],
+            ),
+            payload=CronPayload(kind=row[9], message=row[10]),
+            state=CronJobState(
+                next_run_at_ms=row[11],
+                last_run_at_ms=row[12],
+                last_status=row[13],
+                last_error=row[14],
+                last_assistant_message_id=row[15],
+                last_trace_id=row[16],
+            ),
+            delete_after_run=bool(row[17]),
+            created_at_ms=row[18],
+            updated_at_ms=row[19],
+        )
+
+    async def create_cron_job(self, job: CronJob) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                INSERT INTO cron_jobs (
+                  id, name, session_id, enabled, schedule_kind, schedule_at_ms, schedule_every_ms, schedule_expr, schedule_tz,
+                  payload_kind, payload_message, next_run_at_ms, last_run_at_ms, last_status, last_error,
+                  last_assistant_message_id, last_trace_id, delete_after_run, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    job.id,
+                    job.name,
+                    job.session_id,
+                    int(job.enabled),
+                    job.schedule.kind,
+                    job.schedule.at_ms,
+                    job.schedule.every_ms,
+                    job.schedule.expr,
+                    job.schedule.tz,
+                    job.payload.kind,
+                    job.payload.message,
+                    job.state.next_run_at_ms,
+                    job.state.last_run_at_ms,
+                    job.state.last_status,
+                    job.state.last_error,
+                    job.state.last_assistant_message_id,
+                    job.state.last_trace_id,
+                    int(job.delete_after_run),
+                    job.created_at_ms,
+                    job.updated_at_ms,
+                ),
+            )
+            await db.commit()
+
+    async def get_cron_job(self, job_id: str) -> CronJob:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                """
+                SELECT
+                  id, name, session_id, enabled, schedule_kind, schedule_at_ms, schedule_every_ms, schedule_expr, schedule_tz,
+                  payload_kind, payload_message, next_run_at_ms, last_run_at_ms, last_status, last_error,
+                  last_assistant_message_id, last_trace_id, delete_after_run, created_at, updated_at
+                FROM cron_jobs
+                WHERE id=?
+                """,
+                (job_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                raise KeyError(f"cron job not found: {job_id}")
+            return self._row_to_cron_job(row)
+
+    async def list_cron_jobs(self, *, session_id: str | None = None, include_disabled: bool = True) -> list[CronJob]:
+        query = """
+            SELECT
+              id, name, session_id, enabled, schedule_kind, schedule_at_ms, schedule_every_ms, schedule_expr, schedule_tz,
+              payload_kind, payload_message, next_run_at_ms, last_run_at_ms, last_status, last_error,
+              last_assistant_message_id, last_trace_id, delete_after_run, created_at, updated_at
+            FROM cron_jobs
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if session_id:
+            clauses.append("session_id=?")
+            params.append(session_id)
+        if not include_disabled:
+            clauses.append("enabled=1")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY COALESCE(next_run_at_ms, 9223372036854775807) ASC, created_at ASC"
+
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(query, tuple(params))
+            rows = await cur.fetchall()
+            return [self._row_to_cron_job(row) for row in rows]
+
+    async def list_due_cron_jobs(self, now_ms: int, limit: int = 16) -> list[CronJob]:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                """
+                SELECT
+                  id, name, session_id, enabled, schedule_kind, schedule_at_ms, schedule_every_ms, schedule_expr, schedule_tz,
+                  payload_kind, payload_message, next_run_at_ms, last_run_at_ms, last_status, last_error,
+                  last_assistant_message_id, last_trace_id, delete_after_run, created_at, updated_at
+                FROM cron_jobs
+                WHERE enabled=1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms<=?
+                ORDER BY next_run_at_ms ASC
+                LIMIT ?
+                """,
+                (now_ms, max(1, limit)),
+            )
+            rows = await cur.fetchall()
+            return [self._row_to_cron_job(row) for row in rows]
+
+    async def get_next_cron_wake_ms(self) -> int | None:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "SELECT MIN(next_run_at_ms) FROM cron_jobs WHERE enabled=1 AND next_run_at_ms IS NOT NULL"
+            )
+            row = await cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            return int(row[0])
+
+    async def update_cron_job_enabled(self, job_id: str, *, enabled: bool, next_run_at_ms: int | None) -> CronJob:
+        now = int(time.time() * 1000)
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                """
+                UPDATE cron_jobs
+                SET enabled=?, next_run_at_ms=?, updated_at=?
+                WHERE id=?
+                """,
+                (int(enabled), next_run_at_ms, now, job_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"cron job not found: {job_id}")
+            await db.commit()
+        return await self.get_cron_job(job_id)
+
+    async def delete_cron_job(self, job_id: str) -> bool:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute("DELETE FROM cron_jobs WHERE id=?", (job_id,))
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def update_cron_job_runtime(
+        self,
+        job_id: str,
+        *,
+        next_run_at_ms: int | None,
+        last_run_at_ms: int | None,
+        last_status: str | None,
+        last_error: str | None,
+        last_assistant_message_id: str | None,
+        last_trace_id: str | None,
+        enabled: bool | None = None,
+    ) -> None:
+        now = int(time.time() * 1000)
+        async with aiosqlite.connect(self._path) as db:
+            if enabled is None:
+                await db.execute(
+                    """
+                    UPDATE cron_jobs
+                    SET next_run_at_ms=?, last_run_at_ms=?, last_status=?, last_error=?, last_assistant_message_id=?, last_trace_id=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        next_run_at_ms,
+                        last_run_at_ms,
+                        last_status,
+                        last_error,
+                        last_assistant_message_id,
+                        last_trace_id,
+                        now,
+                        job_id,
+                    ),
+                )
+            else:
+                await db.execute(
+                    """
+                    UPDATE cron_jobs
+                    SET enabled=?, next_run_at_ms=?, last_run_at_ms=?, last_status=?, last_error=?, last_assistant_message_id=?, last_trace_id=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        int(enabled),
+                        next_run_at_ms,
+                        last_run_at_ms,
+                        last_status,
+                        last_error,
+                        last_assistant_message_id,
+                        last_trace_id,
+                        now,
+                        job_id,
+                    ),
+                )
+            await db.commit()
+
+    async def create_cron_job_run(self, *, job_id: str, session_id: str, started_at_ms: int) -> int:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO cron_job_runs (job_id, session_id, started_at, status)
+                VALUES (?, ?, ?, 'running')
+                """,
+                (job_id, session_id, started_at_ms),
+            )
+            await db.commit()
+            run_id = cur.lastrowid
+            if run_id is None:
+                raise RuntimeError("failed to create cron job run")
+            return int(run_id)
+
+    async def finish_cron_job_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        finished_at_ms: int,
+        error: str | None = None,
+        assistant_message_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                UPDATE cron_job_runs
+                SET status=?, finished_at=?, error=?, assistant_message_id=?, trace_id=?
+                WHERE id=?
+                """,
+                (status, finished_at_ms, error, assistant_message_id, trace_id, run_id),
+            )
+            await db.commit()
+
+    async def list_cron_job_runs(self, job_id: str, limit: int = 50) -> list[CronJobRun]:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                """
+                SELECT id, job_id, session_id, started_at, finished_at, status, error, assistant_message_id, trace_id
+                FROM cron_job_runs
+                WHERE job_id=?
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (job_id, max(1, limit)),
+            )
+            rows = await cur.fetchall()
+            return [
+                CronJobRun(
+                    id=row[0],
+                    job_id=row[1],
+                    session_id=row[2],
+                    started_at_ms=row[3],
+                    finished_at_ms=row[4],
+                    status=row[5],
+                    error=row[6],
+                    assistant_message_id=row[7],
+                    trace_id=row[8],
+                )
+                for row in rows
+            ]

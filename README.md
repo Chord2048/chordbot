@@ -40,6 +40,32 @@ Runtime status API:
 curl http://127.0.0.1:4096/channels/status
 ```
 
+## Cron Jobs
+Agent can now be periodically awakened to run a task in an existing session.
+
+API examples:
+```bash
+# Create a job (every 1 hour)
+curl -X POST http://127.0.0.1:4096/cronjobs \
+  -H "content-type: application/json" \
+  -d '{
+    "name": "hourly-summary",
+    "session_id": "<session-id>",
+    "message": "请总结最近进展并给出下一步计划",
+    "schedule": {"kind": "every", "every_ms": 3600000}
+  }'
+
+# List jobs
+curl http://127.0.0.1:4096/cronjobs
+```
+
+CLI examples:
+```bash
+chordcode cronjobs create --session-id <session-id> --name hourly-summary --message "请总结最近进展" --kind every --every-ms 3600000
+chordcode cronjobs list
+chordcode cronjobs runs <job-id>
+```
+
 ## Tests
 Run with pytest (recommended):
 ```bash
@@ -81,6 +107,7 @@ Note: Uvicorn access logs are not included in the JSONL log file. If you want to
 
 ## Docs
 - `chord-code/docs/project.md`
+- `chord-code/docs/cronjobs.md`
 
 ## Notes
 - Do not commit `.env` (contains secrets).

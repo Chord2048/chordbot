@@ -46,6 +46,16 @@ chordcode
 │   ├── send ID TEXT    Add user message
 │   ├── run ID          Run agent loop
 │   └── interrupt ID    Interrupt running session
+├── cronjobs
+│   ├── list            (--session-id --include-disabled/--enabled-only)
+│   ├── get ID
+│   ├── create          (--session-id --name --message --kind --at-ms --every-ms --expr --tz)
+│   ├── delete ID
+│   ├── enable ID
+│   ├── disable ID
+│   ├── run ID          (--force)
+│   ├── runs ID         (--limit)
+│   └── status
 ├── logs
 │   ├── files           List log files
 │   └── view            (--date --level --event --session-id --q --limit)
@@ -115,6 +125,22 @@ chordcode sessions delete <session-id>
 chordcode agent send <session-id> "Explain the main module"
 chordcode agent run <session-id>
 chordcode agent interrupt <session-id>
+```
+
+### Cron Jobs
+```bash
+# Create an hourly wake-up task
+chordcode cronjobs create \
+  --session-id <session-id> \
+  --name "hourly-summary" \
+  --message "请总结最近进展并给出下一步计划" \
+  --kind every \
+  --every-ms 3600000
+
+chordcode cronjobs list
+chordcode cronjobs run <job-id> --force
+chordcode cronjobs runs <job-id> --limit 20
+chordcode cronjobs status
 ```
 
 ### Config inspection

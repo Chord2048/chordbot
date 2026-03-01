@@ -62,6 +62,7 @@ from chordcode.cli.commands.skills import skills_app        # noqa: E402
 from chordcode.cli.commands.mcp import mcp_app              # noqa: E402
 from chordcode.cli.commands.kb import kb_app                # noqa: E402
 from chordcode.cli.commands.agent import agent_app          # noqa: E402
+from chordcode.cli.commands.cronjobs import cronjobs_app    # noqa: E402
 from chordcode.cli.commands.run import run_cmd              # noqa: E402
 
 app.command("serve")(serve_cmd)
@@ -76,3 +77,4 @@ app.add_typer(skills_app, name="skills", help="Skills discovery.")
 app.add_typer(mcp_app, name="mcp", help="MCP server management.")
 app.add_typer(kb_app, name="kb", help="Knowledge base operations.")
 app.add_typer(agent_app, name="agent", help="Agent message & execution.")
+app.add_typer(cronjobs_app, name="cronjobs", help="Scheduled task management.")

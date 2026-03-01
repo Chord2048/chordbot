@@ -19,6 +19,7 @@ from chordcode.channels import ChannelBus, ChannelManager, ChannelSessionBridge
 from chordcode.channels.events import InboundChannelMessage, OutboundChannelMessage
 from chordcode.config import load, config_to_dict, mask_sensitive, save_config, generate_default_yaml, get_config_sources, project_config_paths, GLOBAL_CONFIG_PATHS, _load_yaml_file, _deep_merge
 from chordcode.config_schema import CONFIG_FIELD_META
+from chordcode.cron import CronJobExecResult, CronService
 from chordcode.hookdefs import Hook
 from chordcode.hooks import Hooker, loghook
 from chordcode.llm.openai_chat import OpenAIChatProvider
@@ -26,7 +27,7 @@ from chordcode.loop.interrupt import InterruptManager
 from chordcode.loop.session_loop import SessionLoop
 from chordcode.log import init_logging, logger
 from chordcode.model import (
-    AddMessageRequest, CreateSessionRequest, Message, ModelRef,
+    AddMessageRequest, CreateCronJobRequest, CronJob, CronJobEnabledRequest, CronJobRunRequest, CreateSessionRequest, Message, ModelRef,
     PermissionReply, PermissionRule, RenameSessionRequest, Session, TextPart,
 )
 from chordcode.observability.langfuse_client import init_langfuse, flush_langfuse, shutdown_langfuse
@@ -99,6 +100,7 @@ interrupt = InterruptManager()
 channel_bus = ChannelBus()
 channel_manager = ChannelManager(cfg, channel_bus)
 channel_bridge: ChannelSessionBridge | None = None
+cron_service: CronService | None = None
 _session_locks: dict[str, asyncio.Lock] = {}
 _session_locks_guard = asyncio.Lock()
 
@@ -222,6 +224,19 @@ async def _run_agent_once(session: Session, *, source: str = "api") -> tuple[str
         loop = SessionLoop(cfg=cfg, bus=bus, store=store, perm=perm, tools=tools, llm=llm, interrupt=interrupt, hooks=hooks)
         logger.info("Running session loop", event="session.run.requested", session_id=session.id, source=source)
         return await loop.run(session_id=session.id, source=source)
+
+
+def _require_cron_service() -> CronService:
+    if not cron_service:
+        raise HTTPException(status_code=503, detail="cron service not ready")
+    return cron_service
+
+
+async def _execute_cron_job(job: CronJob) -> CronJobExecResult | None:
+    session = await store.get_session(job.session_id)
+    await _add_user_message(session, job.payload.message, source=f"cron:{job.id}")
+    assistant_message_id, trace_id = await _run_agent_once(session, source=f"cron:{job.id}")
+    return CronJobExecResult(assistant_message_id=assistant_message_id, trace_id=trace_id)
 
 
 async def _extract_assistant_text(session_id: str, message_id: str) -> str:
@@ -395,7 +410,7 @@ app.mount("/static", StaticFiles(directory=str(_web_dir)), name="static")
 
 @app.on_event("startup")
 async def _startup():
-    global channel_bridge
+    global channel_bridge, cron_service
     await store.init()
     await hooks.trigger(Hook.Config, {"config": cfg}, {})
 
@@ -415,10 +430,17 @@ async def _startup():
     channel_bridge = ChannelSessionBridge(bus=channel_bus, process_inbound=_process_channel_inbound)
     await channel_bridge.start()
 
+    cron_service = CronService(store=store, on_job=_execute_cron_job)
+    await cron_service.start()
+
 
 @app.on_event("shutdown")
 async def _shutdown():
     """Shutdown handler to flush Langfuse events and close MCP connections."""
+    global cron_service
+    if cron_service:
+        await cron_service.stop()
+        cron_service = None
     if channel_bridge:
         await channel_bridge.stop()
     await channel_manager.stop_all()
@@ -779,6 +801,94 @@ async def get_todos(session_id: str):
     await store.get_session(session_id)  # Validate session exists
     todos = await store.get_todos(session_id)
     return {"session_id": session_id, "todos": [t.model_dump() for t in todos]}
+
+
+@app.post("/cronjobs")
+async def create_cron_job(body: CreateCronJobRequest):
+    service = _require_cron_service()
+    await _get_session_or_404(body.session_id)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    now = int(time.time() * 1000)
+    job = CronJob(
+        id=str(uuid4()),
+        name=name,
+        session_id=body.session_id,
+        enabled=body.enabled,
+        schedule=body.schedule,
+        payload={"kind": "agent_turn", "message": body.message},
+        created_at_ms=now,
+        updated_at_ms=now,
+        delete_after_run=body.delete_after_run,
+    )
+    try:
+        return await service.create_job(job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/cronjobs")
+async def list_cron_jobs(session_id: str | None = None, include_disabled: bool = True):
+    jobs = await store.list_cron_jobs(session_id=session_id, include_disabled=include_disabled)
+    return {"jobs": [j.model_dump() for j in jobs]}
+
+
+@app.get("/cronjobs/status")
+async def cron_status():
+    service = _require_cron_service()
+    return await service.status()
+
+
+@app.get("/cronjobs/{job_id}")
+async def get_cron_job(job_id: str):
+    try:
+        return await store.get_cron_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0]))
+
+
+@app.delete("/cronjobs/{job_id}")
+async def delete_cron_job(job_id: str):
+    service = _require_cron_service()
+    deleted = await service.delete_job(job_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"cron job not found: {job_id}")
+    return {"ok": True, "job_id": job_id}
+
+
+@app.post("/cronjobs/{job_id}/enabled")
+async def set_cron_job_enabled(job_id: str, body: CronJobEnabledRequest):
+    service = _require_cron_service()
+    try:
+        return await service.set_job_enabled(job_id, enabled=body.enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/cronjobs/{job_id}/run")
+async def run_cron_job(job_id: str, body: CronJobRunRequest | None = None):
+    service = _require_cron_service()
+    force = bool(body.force) if body else False
+    try:
+        ran = await service.run_job(job_id, force=force)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0]))
+    if not ran:
+        raise HTTPException(status_code=409, detail="cron job is disabled; pass force=true to run manually")
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/cronjobs/{job_id}/runs")
+async def list_cron_job_runs(job_id: str, limit: int = 50):
+    try:
+        await store.get_cron_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0]))
+    runs = await store.list_cron_job_runs(job_id, limit=max(1, min(limit, 200)))
+    return {"job_id": job_id, "runs": [r.model_dump() for r in runs]}
 
 
 @app.get("/permissions/pending")

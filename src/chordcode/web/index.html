@@ -17,6 +17,7 @@
   <link rel="stylesheet" href="/static/styles/knowledge.css">
   <link rel="stylesheet" href="/static/styles/settings.css">
   <link rel="stylesheet" href="/static/styles/channels.css">
+  <link rel="stylesheet" href="/static/styles/cronjobs.css">
 
   <!-- Preact & HTM (UMD builds) -->
   <script src="https://unpkg.com/preact@10.19.3/dist/preact.umd.js"></script>
@@ -701,7 +702,8 @@
       const isKnowledgeMode = activeSidePanel === 'knowledge';
       const isSettingsMode = activeSidePanel === 'settings';
       const isChannelsMode = activeSidePanel === 'channels';
-      const isFullPageMode = isKnowledgeMode || isSettingsMode || isChannelsMode;
+      const isCronJobsMode = activeSidePanel === 'cronjobs';
+      const isFullPageMode = isKnowledgeMode || isSettingsMode || isChannelsMode || isCronJobsMode;
       const obsW = observabilityCollapsed ? '48px' : observability.width + 'px';
       const gridStyle = isFullPageMode
         ? 'grid-template-columns: 48px 1fr'
@@ -736,6 +738,11 @@
             />
           ` : isChannelsMode ? html`
             <${ChannelsPanel} />
+          ` : isCronJobsMode ? html`
+            <${CronJobsPanel}
+              sessions=${sessions}
+              activeSessionId=${activeSessionId}
+            />
           ` : isKnowledgeMode ? html`
             <${KnowledgePanel} config=${kbConfig} />
           ` : html`
@@ -846,6 +853,7 @@
       const items = [
         { id: 'chat', icon: '\u{1F4AC}', label: 'Chat' },
         { id: 'channels', icon: '\u{1F4E1}', label: 'Channels' },
+        { id: 'cronjobs', icon: '\u23F0', label: 'Cron Jobs' },
         { id: 'mcp', icon: '\u{1F50C}', label: 'MCP' },
         { id: 'skills', icon: '\u{1F9E0}', label: 'Skills' },
         { id: 'knowledge', icon: '\u{1F4DA}', label: 'Knowledge' },
@@ -1847,6 +1855,552 @@
                   <div class="channels-test-title">${testResult.ok ? 'Test Passed' : 'Test Failed'}</div>
                   <div class="channels-test-message">${testResult.message || ''}</div>
                   <pre class="channels-test-raw">${JSON.stringify(testResult, null, 2)}</pre>
+                </div>
+              `}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // ============ CronJobsPanel ============
+    function CronJobsPanel({ sessions, activeSessionId }) {
+      const [loading, setLoading] = useState(true);
+      const [refreshing, setRefreshing] = useState(false);
+      const [saving, setSaving] = useState(false);
+      const [error, setError] = useState('');
+      const [banner, setBanner] = useState('');
+      const [jobs, setJobs] = useState([]);
+      const [status, setStatus] = useState(null);
+      const [selectedJobId, setSelectedJobId] = useState('');
+      const [runsLoading, setRunsLoading] = useState(false);
+      const [runs, setRuns] = useState([]);
+      const [jobAction, setJobAction] = useState({ id: '', type: '' });
+      const [filterSessionId, setFilterSessionId] = useState('');
+      const [form, setForm] = useState({
+        name: '',
+        session_id: '',
+        message: '',
+        kind: 'every',
+        at_local: '',
+        every_ms: 3600000,
+        expr: '0 * * * *',
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+        enabled: true,
+        delete_after_run: false,
+      });
+
+      useEffect(() => {
+        const sid = activeSessionId || (sessions.length > 0 ? sessions[0].id : '');
+        if (!sid) return;
+        setForm(prev => (prev.session_id ? prev : { ...prev, session_id: sid }));
+      }, [activeSessionId, sessions]);
+
+      useEffect(() => {
+        refreshAll();
+      }, []);
+
+      useEffect(() => {
+        if (!selectedJobId) {
+          setRuns([]);
+          return;
+        }
+        loadRuns(selectedJobId);
+      }, [selectedJobId]);
+
+      function updateForm(key, value) {
+        setForm(prev => ({ ...prev, [key]: value }));
+        setBanner('');
+      }
+
+      function normalizeEveryMs(text) {
+        const n = Number(text);
+        if (!Number.isFinite(n)) return 0;
+        return Math.floor(n);
+      }
+
+      function localInputToMs(localInput) {
+        if (!localInput || !localInput.trim()) return null;
+        const ts = Date.parse(localInput);
+        if (Number.isNaN(ts)) return null;
+        return ts;
+      }
+
+      function scheduleLabel(job) {
+        if (!job || !job.schedule) return '-';
+        const s = job.schedule;
+        if (s.kind === 'at') {
+          return s.at_ms ? ('at ' + formatDateTime(s.at_ms)) : 'at (invalid)';
+        }
+        if (s.kind === 'every') {
+          if (!s.every_ms) return 'every (invalid)';
+          const ms = Number(s.every_ms);
+          if (ms % 3600000 === 0) return 'every ' + (ms / 3600000) + 'h';
+          if (ms % 60000 === 0) return 'every ' + (ms / 60000) + 'm';
+          if (ms % 1000 === 0) return 'every ' + (ms / 1000) + 's';
+          return 'every ' + ms + 'ms';
+        }
+        return 'cron ' + (s.expr || '') + (s.tz ? (' (' + s.tz + ')') : '');
+      }
+
+      function selectedSessionOptions() {
+        return sessions || [];
+      }
+
+      async function refreshAll(opts = {}) {
+        const silent = Boolean(opts.silent);
+        const sessionId = Object.prototype.hasOwnProperty.call(opts, 'sessionId') ? opts.sessionId : filterSessionId;
+        if (silent) setRefreshing(true);
+        else setLoading(true);
+        setError('');
+        try {
+          const query = new URLSearchParams();
+          query.set('include_disabled', 'true');
+          if (sessionId) query.set('session_id', sessionId);
+          const [jobsData, statusData] = await Promise.all([
+            api('/cronjobs?' + query.toString()),
+            api('/cronjobs/status'),
+          ]);
+          const list = jobsData.jobs || [];
+          setJobs(list);
+          setStatus(statusData || null);
+
+          if (selectedJobId && !list.some(j => j.id === selectedJobId)) {
+            setSelectedJobId('');
+          } else if (!selectedJobId && list.length > 0) {
+            setSelectedJobId(list[0].id);
+          }
+        } catch (e) {
+          setError('Failed to load cron jobs: ' + e.message);
+        } finally {
+          if (silent) setRefreshing(false);
+          else setLoading(false);
+        }
+      }
+
+      async function loadRuns(jobId) {
+        if (!jobId) return;
+        setRunsLoading(true);
+        try {
+          const data = await api('/cronjobs/' + encodeURIComponent(jobId) + '/runs?limit=30');
+          setRuns(data.runs || []);
+        } catch (e) {
+          setRuns([]);
+        } finally {
+          setRunsLoading(false);
+        }
+      }
+
+      async function handleCreateJob(e) {
+        e.preventDefault();
+        setSaving(true);
+        setError('');
+        setBanner('');
+        try {
+          const name = (form.name || '').trim();
+          const message = (form.message || '').trim();
+          const sessionId = (form.session_id || '').trim();
+          if (!name || !message || !sessionId) {
+            throw new Error('Name, session and message are required.');
+          }
+
+          const schedule = { kind: form.kind };
+          if (form.kind === 'at') {
+            const atMs = localInputToMs(form.at_local);
+            if (!atMs) throw new Error('Please provide a valid date/time for one-shot schedule.');
+            schedule.at_ms = atMs;
+          } else if (form.kind === 'every') {
+            const everyMs = normalizeEveryMs(form.every_ms);
+            if (!everyMs || everyMs <= 0) throw new Error('Please provide a positive interval in milliseconds.');
+            schedule.every_ms = everyMs;
+          } else if (form.kind === 'cron') {
+            const expr = (form.expr || '').trim();
+            if (!expr) throw new Error('Please provide cron expression.');
+            schedule.expr = expr;
+            if ((form.tz || '').trim()) schedule.tz = form.tz.trim();
+          }
+
+          const created = await api('/cronjobs', {
+            method: 'POST',
+            body: JSON.stringify({
+              name: name,
+              session_id: sessionId,
+              message: message,
+              schedule: schedule,
+              enabled: Boolean(form.enabled),
+              delete_after_run: Boolean(form.delete_after_run),
+            }),
+          });
+          setBanner('Cron job created.');
+          setForm(prev => ({
+            ...prev,
+            name: '',
+            message: '',
+            at_local: '',
+          }));
+          setSelectedJobId(created.id || '');
+          await refreshAll({ silent: true });
+        } catch (e) {
+          setError('Failed to create cron job: ' + e.message);
+        } finally {
+          setSaving(false);
+        }
+      }
+
+      async function handleToggleEnabled(job) {
+        if (!job || !job.id) return;
+        const nextEnabled = !job.enabled;
+        setJobAction({ id: job.id, type: 'toggle' });
+        setError('');
+        setBanner('');
+        try {
+          await api('/cronjobs/' + encodeURIComponent(job.id) + '/enabled', {
+            method: 'POST',
+            body: JSON.stringify({ enabled: nextEnabled }),
+          });
+          setBanner(nextEnabled ? 'Cron job enabled.' : 'Cron job disabled.');
+          await refreshAll({ silent: true });
+          if (selectedJobId === job.id) await loadRuns(job.id);
+        } catch (e) {
+          setError('Failed to update job state: ' + e.message);
+        } finally {
+          setJobAction({ id: '', type: '' });
+        }
+      }
+
+      async function handleRunNow(job) {
+        if (!job || !job.id) return;
+        setJobAction({ id: job.id, type: 'run' });
+        setError('');
+        setBanner('');
+        try {
+          await api('/cronjobs/' + encodeURIComponent(job.id) + '/run', {
+            method: 'POST',
+            body: JSON.stringify({ force: true }),
+          });
+          setBanner('Cron job triggered.');
+          await refreshAll({ silent: true });
+          if (selectedJobId === job.id) await loadRuns(job.id);
+        } catch (e) {
+          setError('Failed to run job: ' + e.message);
+        } finally {
+          setJobAction({ id: '', type: '' });
+        }
+      }
+
+      async function handleDelete(job) {
+        if (!job || !job.id) return;
+        const ok = window.confirm('Delete cron job "' + (job.name || job.id) + '"?');
+        if (!ok) return;
+
+        setJobAction({ id: job.id, type: 'delete' });
+        setError('');
+        setBanner('');
+        try {
+          await api('/cronjobs/' + encodeURIComponent(job.id), { method: 'DELETE' });
+          setBanner('Cron job deleted.');
+          if (selectedJobId === job.id) {
+            setSelectedJobId('');
+            setRuns([]);
+          }
+          await refreshAll({ silent: true });
+        } catch (e) {
+          setError('Failed to delete job: ' + e.message);
+        } finally {
+          setJobAction({ id: '', type: '' });
+        }
+      }
+
+      const enabledJobs = jobs.filter(j => j.enabled).length;
+      const selectedJob = jobs.find(j => j.id === selectedJobId) || null;
+
+      if (loading) {
+        return html`
+          <div class="cronjobs-page">
+            <div class="cronjobs-loading"><span class="spinner"></span> Loading cronjobs...</div>
+          </div>
+        `;
+      }
+
+      return html`
+        <div class="cronjobs-page">
+          <div class="cronjobs-header">
+            <div>
+              <h2>Cron Jobs</h2>
+              <p>Schedule periodic wakeups to inject a message into a session and run the agent loop.</p>
+            </div>
+            <div class="cronjobs-header-actions">
+              <button class="btn btn-sm" onClick=${() => refreshAll({ silent: true })} disabled=${refreshing}>
+                ${refreshing ? 'Refreshing...' : 'Refresh'}
+              </button>
+            </div>
+          </div>
+
+          <div class="cronjobs-overview">
+            <div class="cronjobs-stat-card">
+              <div class="cronjobs-stat-label">Service</div>
+              <div class="cronjobs-stat-value">${status && status.running ? 'running' : 'stopped'}</div>
+            </div>
+            <div class="cronjobs-stat-card">
+              <div class="cronjobs-stat-label">Total Jobs</div>
+              <div class="cronjobs-stat-value">${jobs.length}</div>
+            </div>
+            <div class="cronjobs-stat-card">
+              <div class="cronjobs-stat-label">Enabled Jobs</div>
+              <div class="cronjobs-stat-value">${enabledJobs}</div>
+            </div>
+            <div class="cronjobs-stat-card">
+              <div class="cronjobs-stat-label">Next Wake</div>
+              <div class="cronjobs-stat-value cronjobs-stat-time">
+                ${status && status.next_wake_at_ms ? formatDateTime(status.next_wake_at_ms) : '-'}
+              </div>
+            </div>
+          </div>
+
+          ${(error || banner) && html`
+            <div class="cronjobs-banner ${error ? 'error' : 'success'}">${error || banner}</div>
+          `}
+
+          <div class="cronjobs-grid">
+            <div class="cronjobs-card">
+              <div class="cronjobs-card-header">
+                <h3>Create Cron Job</h3>
+                <span class="badge">agent_turn</span>
+              </div>
+              <form class="cronjobs-form" onSubmit=${handleCreateJob}>
+                <div class="form-group">
+                  <label>Name</label>
+                  <input
+                    class="input"
+                    type="text"
+                    value=${form.name}
+                    onInput=${(e) => updateForm('name', e.target.value)}
+                    placeholder="hourly-summary"
+                    required
+                  />
+                </div>
+                <div class="form-group">
+                  <label>Session</label>
+                  <select
+                    class="input"
+                    value=${form.session_id}
+                    onChange=${(e) => updateForm('session_id', e.target.value)}
+                    required
+                  >
+                    <option value="">Select session</option>
+                    ${selectedSessionOptions().map(s => html`
+                      <option key=${s.id} value=${s.id}>${s.title} (${s.id.slice(0, 8)})</option>
+                    `)}
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Message</label>
+                  <textarea
+                    class="cronjobs-textarea"
+                    value=${form.message}
+                    onInput=${(e) => updateForm('message', e.target.value)}
+                    placeholder="请总结最近进展并给出下一步计划"
+                    required
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Schedule Type</label>
+                  <select class="input" value=${form.kind} onChange=${(e) => updateForm('kind', e.target.value)}>
+                    <option value="every">every (interval)</option>
+                    <option value="cron">cron (expression)</option>
+                    <option value="at">at (one-shot)</option>
+                  </select>
+                </div>
+
+                ${form.kind === 'every' && html`
+                  <div class="form-group">
+                    <label>Every (milliseconds)</label>
+                    <input
+                      class="input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value=${String(form.every_ms)}
+                      onInput=${(e) => updateForm('every_ms', e.target.value)}
+                      placeholder="3600000"
+                    />
+                  </div>
+                `}
+
+                ${form.kind === 'at' && html`
+                  <div class="form-group">
+                    <label>Run At (local time)</label>
+                    <input
+                      class="input"
+                      type="datetime-local"
+                      value=${form.at_local}
+                      onInput=${(e) => updateForm('at_local', e.target.value)}
+                    />
+                  </div>
+                `}
+
+                ${form.kind === 'cron' && html`
+                  <div class="form-group">
+                    <label>Cron Expression</label>
+                    <input
+                      class="input"
+                      type="text"
+                      value=${form.expr}
+                      onInput=${(e) => updateForm('expr', e.target.value)}
+                      placeholder="0 * * * *"
+                    />
+                  </div>
+                  <div class="form-group">
+                    <label>Timezone</label>
+                    <input
+                      class="input"
+                      type="text"
+                      value=${form.tz}
+                      onInput=${(e) => updateForm('tz', e.target.value)}
+                      placeholder="America/Los_Angeles"
+                    />
+                  </div>
+                `}
+
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked=${form.enabled}
+                    onChange=${(e) => updateForm('enabled', e.target.checked)}
+                  />
+                  Start enabled
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked=${form.delete_after_run}
+                    onChange=${(e) => updateForm('delete_after_run', e.target.checked)}
+                    disabled=${form.kind !== 'at'}
+                  />
+                  Delete after run (one-shot only)
+                </label>
+
+                <div class="form-actions">
+                  <button class="btn" type="submit" disabled=${saving}>
+                    ${saving ? 'Creating...' : 'Create'}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div class="cronjobs-card">
+              <div class="cronjobs-card-header">
+                <h3>Jobs</h3>
+                <select
+                  class="input cronjobs-filter-select"
+                  value=${filterSessionId}
+                  onChange=${(e) => {
+                    const next = e.target.value;
+                    setFilterSessionId(next);
+                    refreshAll({ silent: true, sessionId: next });
+                  }}
+                >
+                  <option value="">All sessions</option>
+                  ${selectedSessionOptions().map(s => html`
+                    <option key=${s.id} value=${s.id}>${s.title}</option>
+                  `)}
+                </select>
+              </div>
+
+              <div class="cronjobs-job-list">
+                ${jobs.length === 0 && html`
+                  <div class="cronjobs-empty">
+                    <div class="cronjobs-empty-icon">⏰</div>
+                    <div class="cronjobs-empty-text">No cron jobs configured</div>
+                  </div>
+                `}
+                ${jobs.map(job => {
+                  const selected = selectedJobId === job.id;
+                  const busyThis = jobAction.id === job.id;
+                  const schedule = scheduleLabel(job);
+                  const nextRun = job.state && job.state.next_run_at_ms ? formatDateTime(job.state.next_run_at_ms) : '-';
+                  return html`
+                    <div key=${job.id} class="cronjobs-job-item ${selected ? 'selected' : ''}">
+                      <button class="cronjobs-job-main" onClick=${() => setSelectedJobId(job.id)}>
+                        <div class="cronjobs-job-title-row">
+                          <span class="cronjobs-job-title">${job.name}</span>
+                          <span class="badge ${job.enabled ? 'badge-success' : 'badge-warning'}">
+                            ${job.enabled ? 'enabled' : 'disabled'}
+                          </span>
+                        </div>
+                        <div class="cronjobs-job-meta">${schedule}</div>
+                        <div class="cronjobs-job-meta">session: ${job.session_id.slice(0, 8)} · next: ${nextRun}</div>
+                      </button>
+                      <div class="cronjobs-job-actions">
+                        <button class="btn btn-sm" onClick=${() => handleRunNow(job)} disabled=${busyThis}>
+                          ${busyThis && jobAction.type === 'run' ? 'Running...' : 'Run'}
+                        </button>
+                        <button class="btn btn-sm ${job.enabled ? 'btn-secondary' : 'btn-success'}" onClick=${() => handleToggleEnabled(job)} disabled=${busyThis}>
+                          ${busyThis && jobAction.type === 'toggle' ? 'Saving...' : (job.enabled ? 'Disable' : 'Enable')}
+                        </button>
+                        <button class="btn btn-sm btn-danger" onClick=${() => handleDelete(job)} disabled=${busyThis}>
+                          ${busyThis && jobAction.type === 'delete' ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </div>
+                    </div>
+                  `;
+                })}
+              </div>
+            </div>
+
+            <div class="cronjobs-card cronjobs-runs-card">
+              <div class="cronjobs-card-header">
+                <h3>Run History</h3>
+                <div class="cronjobs-card-actions">
+                  ${selectedJob && html`<span class="badge">${selectedJob.name}</span>`}
+                  <button class="btn btn-sm" onClick=${() => selectedJobId && loadRuns(selectedJobId)} disabled=${!selectedJobId || runsLoading}>
+                    ${runsLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+              </div>
+
+              ${!selectedJobId && html`
+                <div class="cronjobs-empty">
+                  <div class="cronjobs-empty-icon">📜</div>
+                  <div class="cronjobs-empty-text">Select a job to view history</div>
+                </div>
+              `}
+
+              ${selectedJobId && runs.length === 0 && !runsLoading && html`
+                <div class="cronjobs-empty">
+                  <div class="cronjobs-empty-icon">📭</div>
+                  <div class="cronjobs-empty-text">No run history</div>
+                </div>
+              `}
+
+              ${selectedJobId && runs.length > 0 && html`
+                <div class="cronjobs-runs-list">
+                  ${runs.map(run => {
+                    const statusClass = run.status === 'ok'
+                      ? 'badge-success'
+                      : (run.status === 'error' ? 'badge-danger' : 'badge-warning');
+                    const elapsed = run.finished_at_ms && run.started_at_ms
+                      ? formatDuration(run.finished_at_ms - run.started_at_ms)
+                      : '-';
+                    return html`
+                      <div key=${run.id} class="cronjobs-run-item">
+                        <div class="cronjobs-run-top">
+                          <span class="badge ${statusClass}">${run.status}</span>
+                          <span class="cronjobs-run-time">${formatDateTime(run.started_at_ms)}</span>
+                          <span class="cronjobs-run-elapsed">${elapsed}</span>
+                        </div>
+                        <div class="cronjobs-run-meta">
+                          <span>run#${run.id}</span>
+                          ${run.assistant_message_id && html`<span>msg: ${run.assistant_message_id.slice(0, 10)}</span>`}
+                          ${run.trace_id && html`<span>trace: ${run.trace_id.slice(0, 10)}</span>`}
+                        </div>
+                        ${run.error && html`
+                          <div class="cronjobs-run-error">${run.error}</div>
+                        `}
+                      </div>
+                    `;
+                  })}
                 </div>
               `}
             </div>

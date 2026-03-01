@@ -9,6 +9,8 @@ Role = Literal["user", "assistant", "tool"]
 # Todo types
 TodoStatus = Literal["pending", "in_progress", "completed", "cancelled"]
 TodoPriority = Literal["high", "medium", "low"]
+CronScheduleKind = Literal["at", "every", "cron"]
+CronJobStatus = Literal["running", "ok", "error", "skipped"]
 
 
 class TodoItem(BaseModel):
@@ -18,6 +20,53 @@ class TodoItem(BaseModel):
     status: TodoStatus = "pending"
     priority: TodoPriority = "medium"
     activeForm: str  # Present continuous form, e.g., "Running tests..."
+
+
+class CronSchedule(BaseModel):
+    kind: CronScheduleKind
+    at_ms: int | None = None
+    every_ms: int | None = None
+    expr: str | None = None
+    tz: str | None = None
+
+
+class CronPayload(BaseModel):
+    kind: Literal["agent_turn"] = "agent_turn"
+    message: str
+
+
+class CronJobState(BaseModel):
+    next_run_at_ms: int | None = None
+    last_run_at_ms: int | None = None
+    last_status: CronJobStatus | None = None
+    last_error: str | None = None
+    last_assistant_message_id: str | None = None
+    last_trace_id: str | None = None
+
+
+class CronJob(BaseModel):
+    id: str
+    name: str
+    session_id: str
+    enabled: bool = True
+    schedule: CronSchedule
+    payload: CronPayload
+    state: CronJobState = Field(default_factory=CronJobState)
+    created_at_ms: int
+    updated_at_ms: int
+    delete_after_run: bool = False
+
+
+class CronJobRun(BaseModel):
+    id: int
+    job_id: str
+    session_id: str
+    started_at_ms: int
+    finished_at_ms: int | None = None
+    status: CronJobStatus
+    error: str | None = None
+    assistant_message_id: str | None = None
+    trace_id: str | None = None
 
 
 class ModelRef(BaseModel):
@@ -161,3 +210,19 @@ class AddMessageRequest(BaseModel):
 class RenameSessionRequest(BaseModel):
     title: str = Field(..., min_length=1, description="New session title")
 
+
+class CreateCronJobRequest(BaseModel):
+    name: str = Field(..., min_length=1, description="Cron job name")
+    session_id: str = Field(..., min_length=1, description="Target session ID")
+    schedule: CronSchedule
+    message: str = Field(..., min_length=1, description="Message to inject into the session when triggered")
+    enabled: bool = True
+    delete_after_run: bool = False
+
+
+class CronJobEnabledRequest(BaseModel):
+    enabled: bool = Field(..., description="Enable or disable the job")
+
+
+class CronJobRunRequest(BaseModel):
+    force: bool = Field(False, description="Allow manual run for disabled jobs")
