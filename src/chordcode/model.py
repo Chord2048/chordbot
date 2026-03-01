@@ -80,6 +80,15 @@ class PermissionRule(BaseModel):
     action: Literal["allow", "deny", "ask"]
 
 
+class DaytonaRuntimeConfig(BaseModel):
+    sandbox_id: str | None = None
+
+
+class SessionRuntime(BaseModel):
+    backend: Literal["local", "daytona"] = "local"
+    daytona: DaytonaRuntimeConfig | None = None
+
+
 class Session(BaseModel):
     id: str
     title: str
@@ -88,6 +97,7 @@ class Session(BaseModel):
     created_at: int
     updated_at: int
     permission_rules: list[PermissionRule]
+    runtime: SessionRuntime = Field(default_factory=SessionRuntime)
 
 
 class Message(BaseModel):
@@ -201,6 +211,7 @@ class CreateSessionRequest(BaseModel):
     title: str = Field(default="New session", description="Session title")
     cwd: str = Field(default="", description="Current working directory (defaults to worktree)")
     permission_rules: Optional[list[PermissionRule]] = Field(default=None, description="Permission rules (defaults to global config)")
+    runtime: SessionRuntime | None = Field(default=None, description="Session runtime backend (local or daytona)")
 
 
 class AddMessageRequest(BaseModel):

@@ -101,5 +101,11 @@ _r("hooks.debug", "Enable hook debug logging", False)
 # --- Web Search ---
 _r("web_search.tavily_api_key", "Tavily API key for web search", "", sensitive=True)
 
+# --- Daytona Runtime ---
+_r("daytona.api_key", "Daytona API key", "", sensitive=True)
+_r("daytona.server_url", "Daytona server URL", "")
+_r("daytona.target", "Daytona target environment", "")
+_r("daytona.default_workspace", "Default workspace path for Daytona sessions", "/workspace")
+
 # --- Prompt Templates ---
 _r("prompt_templates", "Custom template variables for system prompt (dict)", {})

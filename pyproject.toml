@@ -21,6 +21,7 @@ dependencies = [
   "typer>=0.12",
   "rich>=13.0",
   "croniter>=2.0",
+  "daytona>=0.148.0,<1",
 ]
 
 [project.scripts]

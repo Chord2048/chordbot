@@ -14,3 +14,4 @@ mcp>=1.0
 typer>=0.12
 rich>=13.0
 croniter>=2.0
+daytona<1,>=0.148.0

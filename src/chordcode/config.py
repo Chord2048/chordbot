@@ -96,6 +96,14 @@ class WebSearchConfig:
 
 
 @dataclass(frozen=True)
+class DaytonaConfig:
+    api_key: str = ""
+    server_url: str = ""
+    target: str = ""
+    default_workspace: str = "/workspace"
+
+
+@dataclass(frozen=True)
 class Config:
     openai: OpenAIConfig
     langfuse: LangfuseConfig
@@ -110,6 +118,7 @@ class Config:
     default_worktree: str
     default_permission_action: Literal["allow", "deny", "ask"]
     prompt_templates: dict[str, str]
+    daytona: DaytonaConfig = field(default_factory=DaytonaConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +307,7 @@ def _build_config(merged: dict[str, Any]) -> Config:
     vlm = g.get("vlm", {}) or {}
     hooks = g.get("hooks", {}) or {}
     ws = g.get("web_search", {}) or {}
+    daytona = g.get("daytona", {}) or {}
     pt = g.get("prompt_templates", {}) or {}
     if not isinstance(pt, dict):
         pt = {}
@@ -358,6 +368,12 @@ def _build_config(merged: dict[str, Any]) -> Config:
         default_worktree=default_worktree,
         default_permission_action=default_permission_action,
         prompt_templates={str(k): str(v) for k, v in pt.items()},
+        daytona=DaytonaConfig(
+            api_key=str(daytona.get("api_key", "") or "").strip() or str(os.getenv("DAYTONA_API_KEY", "")).strip(),
+            server_url=str(daytona.get("server_url", "") or "").strip() or str(os.getenv("DAYTONA_SERVER_URL", "")).strip(),
+            target=str(daytona.get("target", "") or "").strip() or str(os.getenv("DAYTONA_TARGET", "")).strip(),
+            default_workspace=str(daytona.get("default_workspace", "/workspace") or "/workspace").strip() or "/workspace",
+        ),
     )
 
 

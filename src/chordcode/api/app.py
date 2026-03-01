@@ -28,13 +28,15 @@ from chordcode.loop.session_loop import SessionLoop
 from chordcode.log import init_logging, logger
 from chordcode.model import (
     AddMessageRequest, CreateCronJobRequest, CronJob, CronJobEnabledRequest, CronJobRunRequest, CreateSessionRequest, Message, ModelRef,
-    PermissionReply, PermissionRule, RenameSessionRequest, Session, TextPart,
+    PermissionReply, PermissionRule, RenameSessionRequest, Session, SessionRuntime, DaytonaRuntimeConfig, TextPart,
 )
 from chordcode.observability.langfuse_client import init_langfuse, flush_langfuse, shutdown_langfuse
 from chordcode.observability.langfuse_hook import create_langfuse_hook
 from chordcode.permission.service import PermissionService
+from chordcode.runtime import DaytonaManager, DaytonaOperationError, DaytonaUnavailableError
 from chordcode.store.sqlite import SQLiteStore
 from chordcode.tools.bash import BashCtx, BashTool
+from chordcode.tools.daytona import DaytonaBashTool, DaytonaCtx, DaytonaGlobTool, DaytonaGrepTool, DaytonaReadTool, DaytonaWriteTool
 from chordcode.tools.files import FileCtx, ReadTool, WriteTool
 from chordcode.tools.grep import GlobTool, GrepTool, SearchCtx
 from chordcode.tools.skill import SkillCtx, SkillTool
@@ -72,6 +74,7 @@ if langfuse_hook:
 
 perm = PermissionService(bus, store, hooks)
 mcp_manager = MCPManager(bus=bus)
+daytona_manager = DaytonaManager(cfg.daytona, store)
 
 # Initialize KB backend (optional — disabled when base_url is empty)
 kb_client = None
@@ -197,12 +200,33 @@ async def _add_user_message(session: Session, text: str, *, source: str = "api")
 
 
 async def _build_tools(session: Session) -> ToolRegistry:
-    builtin_tools = [
-        BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
-        ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-        GlobTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
-        GrepTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
-        WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+    runtime_tools: list[Any]
+    if session.runtime.backend == "daytona":
+        sandbox_ref = await daytona_manager.get_sandbox_for_session(session)
+        daytona_ctx = DaytonaCtx(
+            worktree=session.worktree,
+            cwd=session.cwd,
+            sandbox=sandbox_ref.sandbox,
+            sandbox_id=sandbox_ref.sandbox_id,
+            manager=daytona_manager,
+        )
+        runtime_tools = [
+            DaytonaBashTool(daytona_ctx),
+            DaytonaReadTool(daytona_ctx),
+            DaytonaGlobTool(daytona_ctx),
+            DaytonaGrepTool(daytona_ctx),
+            DaytonaWriteTool(daytona_ctx),
+        ]
+    else:
+        runtime_tools = [
+            BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
+            ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+            GlobTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
+            GrepTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
+            WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
+        ]
+
+    builtin_tools = runtime_tools + [
         TavilySearchTool(WebSearchCtx(tavily_api_key=cfg.web_search.tavily_api_key)),
         WebFetchTool(),
         SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
@@ -290,6 +314,7 @@ async def _resolve_or_create_channel_session(msg: InboundChannelMessage) -> Sess
         created_at=now,
         updated_at=now,
         permission_rules=_build_feishu_channel_rules(runtime_cfg),
+        runtime=SessionRuntime(backend="local"),
     )
     await store.create_session(s)
     await store.bind_channel_session(
@@ -701,11 +726,30 @@ async def list_logs(
 
 @app.post("/sessions")
 async def create_session(body: CreateSessionRequest):
-    worktree = body.worktree.strip()
-    if not worktree or not os.path.isabs(worktree):
-        raise HTTPException(status_code=400, detail="worktree must be an absolute path")
+    requested_runtime = body.runtime or SessionRuntime(backend="local")
+    runtime_backend = requested_runtime.backend
+
+    raw_worktree = body.worktree.strip()
     title = body.title.strip() or "New session"
-    cwd = body.cwd.strip() or worktree
+    if runtime_backend == "daytona":
+        default_workspace = cfg.daytona.default_workspace or "/workspace"
+        worktree = raw_worktree or default_workspace
+        cwd = body.cwd.strip() or worktree
+        if not worktree.startswith("/") or not cwd.startswith("/"):
+            raise HTTPException(status_code=400, detail="daytona worktree/cwd must be absolute remote paths")
+        runtime = SessionRuntime(
+            backend="daytona",
+            daytona=DaytonaRuntimeConfig(
+                sandbox_id=requested_runtime.daytona.sandbox_id if requested_runtime.daytona else None,
+            ),
+        )
+    else:
+        worktree = raw_worktree
+        if not worktree or not os.path.isabs(worktree):
+            raise HTTPException(status_code=400, detail="worktree must be an absolute path")
+        cwd = body.cwd.strip() or worktree
+        runtime = SessionRuntime(backend="local")
+
     permission_rules = [PermissionRule.model_validate(x) for x in body.permission_rules] if body.permission_rules else _default_rules()
     now = int(time.time() * 1000)
     s = Session(
@@ -716,8 +760,22 @@ async def create_session(body: CreateSessionRequest):
         created_at=now,
         updated_at=now,
         permission_rules=permission_rules,
+        runtime=runtime,
     )
     await store.create_session(s)
+    if runtime_backend == "daytona":
+        try:
+            s = await daytona_manager.ensure_session_runtime_async(s)
+        except DaytonaUnavailableError as exc:
+            await store.delete_session(s.id)
+            raise HTTPException(status_code=503, detail=str(exc))
+        except DaytonaOperationError as exc:
+            await store.delete_session(s.id)
+            msg = str(exc)
+            if "not found" in msg.lower():
+                raise HTTPException(status_code=400, detail=msg)
+            raise HTTPException(status_code=502, detail=msg)
+
     await bus.publish(Event(type="session.created", properties={"session_id": s.id, "info": s.model_dump()}))
     return s
 
@@ -763,7 +821,12 @@ async def add_message(session_id: str, body: AddMessageRequest):
 @app.post("/sessions/{session_id}/run")
 async def run_session(session_id: str):
     session = await store.get_session(session_id)
-    msg_id, trace_id = await _run_agent_once(session, source="api")
+    try:
+        msg_id, trace_id = await _run_agent_once(session, source="api")
+    except DaytonaUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except DaytonaOperationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
     result = {"assistant_message_id": msg_id}
     if trace_id:
         result["trace_id"] = trace_id

@@ -71,11 +71,24 @@ def sessions_create(
     worktree: str = typer.Option(..., "--worktree", "-w", help="Absolute path to worktree."),
     title: str = typer.Option("New session", "--title", "-t", help="Session title."),
     cwd: str = typer.Option("", "--cwd", help="Working directory (defaults to worktree)."),
+    runtime: str = typer.Option("local", "--runtime", help="Runtime backend: local | daytona."),
+    daytona_sandbox_id: str = typer.Option("", "--daytona-sandbox-id", help="Existing Daytona sandbox ID."),
 ):
     """Create a new session."""
     out = _out()
     try:
-        data = asyncio.run(_client().post("/sessions", json={"worktree": worktree, "title": title, "cwd": cwd}))
+        runtime_val = runtime.strip().lower()
+        if runtime_val not in ("local", "daytona"):
+            raise typer.BadParameter("runtime must be one of: local, daytona")
+        payload: dict[str, object] = {"worktree": worktree, "title": title, "cwd": cwd}
+        if runtime_val == "daytona":
+            payload["runtime"] = {
+                "backend": "daytona",
+                "daytona": {"sandbox_id": daytona_sandbox_id.strip() or None},
+            }
+        else:
+            payload["runtime"] = {"backend": "local"}
+        data = asyncio.run(_client().post("/sessions", json=payload))
         if out.json_mode:
             out.data(data)
         else:

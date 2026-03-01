@@ -40,10 +40,13 @@ class SQLiteStore:
                   cwd TEXT NOT NULL,
                   created_at INTEGER NOT NULL,
                   updated_at INTEGER NOT NULL,
-                  permission_rules_json TEXT NOT NULL
+                  permission_rules_json TEXT NOT NULL,
+                  runtime_backend TEXT NOT NULL DEFAULT 'local',
+                  runtime_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """,
             )
+            await self._migrate_sessions_runtime_columns(db)
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS channel_sessions (
@@ -186,12 +189,23 @@ class SQLiteStore:
             )
             await db.commit()
 
+    async def _migrate_sessions_runtime_columns(self, db: aiosqlite.Connection) -> None:
+        cur = await db.execute("PRAGMA table_info(sessions)")
+        rows = await cur.fetchall()
+        cols = {str(r[1]) for r in rows}
+        if "runtime_backend" not in cols:
+            await db.execute("ALTER TABLE sessions ADD COLUMN runtime_backend TEXT NOT NULL DEFAULT 'local'")
+        if "runtime_json" not in cols:
+            await db.execute("ALTER TABLE sessions ADD COLUMN runtime_json TEXT NOT NULL DEFAULT '{}'")
+
     async def create_session(self, session: Session) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
                 """
-                INSERT INTO sessions (id,title,worktree,cwd,created_at,updated_at,permission_rules_json)
-                VALUES (?,?,?,?,?,?,?)
+                INSERT INTO sessions (
+                  id,title,worktree,cwd,created_at,updated_at,permission_rules_json,runtime_backend,runtime_json
+                )
+                VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     session.id,
@@ -201,6 +215,8 @@ class SQLiteStore:
                     session.created_at,
                     session.updated_at,
                     json.dumps([r.model_dump() for r in session.permission_rules]),
+                    session.runtime.backend,
+                    json.dumps(session.runtime.model_dump()),
                 ),
             )
             await db.commit()
@@ -208,13 +224,25 @@ class SQLiteStore:
     async def get_session(self, session_id: str) -> Session:
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute(
-                "SELECT id,title,worktree,cwd,created_at,updated_at,permission_rules_json FROM sessions WHERE id=?",
+                """
+                SELECT id,title,worktree,cwd,created_at,updated_at,permission_rules_json,runtime_backend,runtime_json
+                FROM sessions WHERE id=?
+                """,
                 (session_id,),
             )
             row = await cur.fetchone()
             if not row:
                 raise KeyError(f"session not found: {session_id}")
             rules = [PermissionRule.model_validate(x) for x in json.loads(row[6])]
+            runtime_json = {}
+            try:
+                runtime_json = json.loads(row[8]) if row[8] else {}
+            except Exception:
+                runtime_json = {}
+            if not isinstance(runtime_json, dict):
+                runtime_json = {}
+            if "backend" not in runtime_json:
+                runtime_json["backend"] = row[7] or "local"
             return Session(
                 id=row[0],
                 title=row[1],
@@ -223,6 +251,7 @@ class SQLiteStore:
                 created_at=row[4],
                 updated_at=row[5],
                 permission_rules=rules,
+                runtime=runtime_json,
             )
 
     async def touch_session(self, session_id: str) -> None:
@@ -236,24 +265,36 @@ class SQLiteStore:
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute(
                 """
-                SELECT id,title,worktree,cwd,created_at,updated_at,permission_rules_json
+                SELECT id,title,worktree,cwd,created_at,updated_at,permission_rules_json,runtime_backend,runtime_json
                 FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?
                 """,
                 (limit, offset),
             )
             rows = await cur.fetchall()
-            return [
-                Session(
-                    id=row[0],
-                    title=row[1],
-                    worktree=row[2],
-                    cwd=row[3],
-                    created_at=row[4],
-                    updated_at=row[5],
-                    permission_rules=[PermissionRule.model_validate(x) for x in json.loads(row[6])],
+            out: list[Session] = []
+            for row in rows:
+                runtime_json = {}
+                try:
+                    runtime_json = json.loads(row[8]) if row[8] else {}
+                except Exception:
+                    runtime_json = {}
+                if not isinstance(runtime_json, dict):
+                    runtime_json = {}
+                if "backend" not in runtime_json:
+                    runtime_json["backend"] = row[7] or "local"
+                out.append(
+                    Session(
+                        id=row[0],
+                        title=row[1],
+                        worktree=row[2],
+                        cwd=row[3],
+                        created_at=row[4],
+                        updated_at=row[5],
+                        permission_rules=[PermissionRule.model_validate(x) for x in json.loads(row[6])],
+                        runtime=runtime_json,
+                    ),
                 )
-                for row in rows
-            ]
+            return out
 
     async def update_session_title(self, session_id: str, title: str) -> Session:
         now = int(time.time() * 1000)
@@ -273,6 +314,18 @@ class SQLiteStore:
             cur = await db.execute(
                 "UPDATE sessions SET permission_rules_json=?, updated_at=? WHERE id=?",
                 (json.dumps([r.model_dump() for r in rules]), now, session_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"session not found: {session_id}")
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def update_session_runtime(self, session_id: str, runtime_backend: str, runtime_json: dict[str, Any]) -> Session:
+        now = int(time.time() * 1000)
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "UPDATE sessions SET runtime_backend=?, runtime_json=?, updated_at=? WHERE id=?",
+                (runtime_backend, json.dumps(runtime_json), now, session_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"session not found: {session_id}")

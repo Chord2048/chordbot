@@ -37,7 +37,8 @@ export const api = {
     return request(`/sessions/${sessionId}`);
   },
 
-  async createSession({ worktree, title, cwd, permissionRules }) {
+  async createSession({ worktree, title, cwd, permissionRules, runtime, daytonaSandboxId }) {
+    const backend = (runtime || 'local').toLowerCase();
     return request('/sessions', {
       method: 'POST',
       body: JSON.stringify({
@@ -45,6 +46,9 @@ export const api = {
         title,
         cwd,
         permission_rules: permissionRules,
+        runtime: backend === 'daytona'
+          ? { backend: 'daytona', daytona: { sandbox_id: daytonaSandboxId || null } }
+          : { backend: 'local' },
       }),
     });
   },

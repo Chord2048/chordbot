@@ -37,7 +37,7 @@ chordcode
 ├── sessions
 │   ├── list            (--limit --offset)
 │   ├── get ID
-│   ├── create          (--worktree --title --cwd)
+│   ├── create          (--worktree --title --cwd --runtime --daytona-sandbox-id)
 │   ├── rename ID       (--title)
 │   ├── delete ID
 │   ├── messages ID
@@ -105,6 +105,9 @@ chordcode stop
 # Auto-approve permissions, stream output
 chordcode run "Reply with PONG" --permission allow
 
+# Run in Daytona runtime (reuse existing sandbox)
+chordcode run "List files" --runtime daytona --daytona-sandbox-id sbx_xxx --permission allow
+
 # JSON mode, no streaming, auto-cleanup
 chordcode run "List files in /tmp" --json --no-stream --permission allow
 
@@ -116,6 +119,7 @@ chordcode run "Continue the task" --session-id abc-123
 ```bash
 chordcode sessions list --limit 10
 chordcode sessions create --worktree /path/to/project --title "My Session"
+chordcode sessions create --worktree /workspace --runtime daytona --title "Remote Session"
 chordcode sessions messages <session-id>
 chordcode sessions delete <session-id>
 ```

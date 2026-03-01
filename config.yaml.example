@@ -74,6 +74,13 @@ hooks:
 web_search:
   tavily_api_key: ""
 
+# --- Daytona Runtime (optional) ---
+daytona:
+  api_key: ""
+  server_url: ""
+  target: ""
+  default_workspace: "/workspace"
+
 # --- Prompt template variables (optional) ---
 # Custom variables available as {{key}} in system prompt.
 # prompt_templates:

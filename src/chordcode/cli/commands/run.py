@@ -20,6 +20,8 @@ async def _quick_run(
     model: str | None,
     permission: str,
     worktree: str,
+    runtime: str,
+    daytona_sandbox_id: str,
     session_id: str | None,
     no_stream: bool,
     cleanup: bool,
@@ -39,7 +41,16 @@ async def _quick_run(
         sid = session_id
     else:
         try:
-            data = await client.post("/sessions", json={"worktree": worktree, "title": f"cli: {message[:40]}"})
+            runtime_val = runtime.strip().lower()
+            create_payload: dict[str, object] = {"worktree": worktree, "title": f"cli: {message[:40]}"}
+            if runtime_val == "daytona":
+                create_payload["runtime"] = {
+                    "backend": "daytona",
+                    "daytona": {"sandbox_id": daytona_sandbox_id.strip() or None},
+                }
+            else:
+                create_payload["runtime"] = {"backend": "local"}
+            data = await client.post("/sessions", json=create_payload)
             sid = data["id"]
             temp_session = True
         except APIError as e:
@@ -181,6 +192,8 @@ def run_cmd(
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override model (not yet implemented)."),
     permission: str = typer.Option("ask", "--permission", "-p", help="Permission handling: allow | deny | ask."),
     worktree: str = typer.Option("", "--worktree", "-w", help="Worktree path (defaults to cwd)."),
+    runtime: str = typer.Option("local", "--runtime", help="Runtime backend: local | daytona."),
+    daytona_sandbox_id: str = typer.Option("", "--daytona-sandbox-id", help="Existing Daytona sandbox ID."),
     session_id: Optional[str] = typer.Option(None, "--session-id", "-s", help="Use existing session."),
     no_stream: bool = typer.Option(False, "--no-stream", help="Disable streaming; wait for completion."),
     cleanup: bool = typer.Option(True, "--cleanup/--no-cleanup", help="Delete temp session after run."),
@@ -191,6 +204,11 @@ def run_cmd(
     wt = worktree or os.getcwd()
     if not os.path.isabs(wt):
         wt = os.path.abspath(wt)
+    runtime_val = runtime.strip().lower()
+    if runtime_val not in ("local", "daytona"):
+        raise typer.BadParameter("runtime must be one of: local, daytona")
+    if runtime_val == "daytona" and not worktree:
+        wt = "/workspace"
 
     asyncio.run(
         _quick_run(
@@ -199,6 +217,8 @@ def run_cmd(
             model=model,
             permission=permission,
             worktree=wt,
+            runtime=runtime_val,
+            daytona_sandbox_id=daytona_sandbox_id,
             session_id=session_id,
             no_stream=no_stream,
             cleanup=cleanup,

@@ -208,6 +208,7 @@
       const [observabilityTab, setObservabilityTab] = useState('events');
       const [observabilityCollapsed, setObservabilityCollapsed] = useState(false);
       const [defaultWorktree, setDefaultWorktree] = useState('');
+      const [defaultDaytonaWorkspace, setDefaultDaytonaWorkspace] = useState('/workspace');
       const [logFiles, setLogFiles] = useState([]);
       const [selectedLogDate, setSelectedLogDate] = useState('');
       const [logFilters, setLogFilters] = useState({ level: '', event: '', session_id: '', q: '' });
@@ -306,6 +307,7 @@
       useEffect(() => {
         api('/config').then(cfg => {
           setDefaultWorktree(cfg.default_worktree || '');
+          setDefaultDaytonaWorkspace((cfg.daytona && cfg.daytona.default_workspace) || '/workspace');
         }).catch(e => console.error('Config error:', e));
 
         api('/sessions').then(data => {
@@ -393,11 +395,19 @@
       }
 
       // Create session
-      async function createSession(worktree, title) {
+      async function createSession(worktree, title, runtimeBackend, daytonaSandboxId) {
         try {
+          const backend = (runtimeBackend || 'local').toLowerCase();
+          const payload = {
+            worktree: worktree,
+            title: title || 'New Session',
+            runtime: backend === 'daytona'
+              ? { backend: 'daytona', daytona: { sandbox_id: daytonaSandboxId || null } }
+              : { backend: 'local' },
+          };
           const session = await api('/sessions', {
             method: 'POST',
-            body: JSON.stringify({ worktree: worktree, title: title || 'New Session' }),
+            body: JSON.stringify(payload),
           });
           setSessions(prev => sortSessionsByUpdated([session, ...prev]));
           setShowNewSessionForm(false);
@@ -757,6 +767,7 @@
               showForm=${showNewSessionForm}
               onToggleForm=${() => setShowNewSessionForm(!showNewSessionForm)}
               defaultWorktree=${defaultWorktree}
+              defaultDaytonaWorkspace=${defaultDaytonaWorkspace}
               renamingId=${sessionAction.renamingId}
               deletingId=${sessionAction.deletingId}
               mcpServers=${mcpServers}
@@ -880,7 +891,7 @@
     function SidePanel({
       activeSidePanel,
       sessions, activeId, onSelect, onCreate, onRename, onDelete,
-      showForm, onToggleForm, defaultWorktree, renamingId, deletingId,
+      showForm, onToggleForm, defaultWorktree, defaultDaytonaWorkspace, renamingId, deletingId,
       mcpServers, mcpTools, mcpLoading, mcpError,
       onMcpRefresh, onMcpConnect, onMcpDisconnect, onMcpAddServer,
       skills, skillsLoading, skillsError, onSkillsRefresh, onLoadSkillDetail,
@@ -898,6 +909,7 @@
               showForm=${showForm}
               onToggleForm=${onToggleForm}
               defaultWorktree=${defaultWorktree}
+              defaultDaytonaWorkspace=${defaultDaytonaWorkspace}
               renamingId=${renamingId}
               deletingId=${deletingId}
             />
@@ -938,11 +950,14 @@
       showForm,
       onToggleForm,
       defaultWorktree,
+      defaultDaytonaWorkspace,
       renamingId,
       deletingId,
     }) {
       const [worktree, setWorktree] = useState(defaultWorktree || '');
       const [title, setTitle] = useState('');
+      const [runtimeBackend, setRuntimeBackend] = useState('local');
+      const [daytonaSandboxId, setDaytonaSandboxId] = useState('');
       const [editingSessionId, setEditingSessionId] = useState(null);
       const [editingTitle, setEditingTitle] = useState('');
 
@@ -953,6 +968,14 @@
       }, [defaultWorktree]);
 
       useEffect(() => {
+        if (runtimeBackend === 'daytona') {
+          setWorktree(prev => prev || defaultDaytonaWorkspace || '/workspace');
+        } else if (runtimeBackend === 'local') {
+          setWorktree(prev => prev || defaultWorktree || '');
+        }
+      }, [runtimeBackend, defaultWorktree, defaultDaytonaWorkspace]);
+
+      useEffect(() => {
         if (editingSessionId && !sessions.some(s => s.id === editingSessionId)) {
           setEditingSessionId(null);
           setEditingTitle('');
@@ -961,10 +984,12 @@
 
       function handleCreate(e) {
         e.preventDefault();
-        if (worktree.trim()) {
-          onCreate(worktree.trim(), title.trim());
-          setWorktree(defaultWorktree || '');
+        const wt = worktree.trim() || (runtimeBackend === 'daytona' ? (defaultDaytonaWorkspace || '/workspace') : '');
+        if (wt) {
+          onCreate(wt, title.trim(), runtimeBackend, daytonaSandboxId.trim());
+          setWorktree(runtimeBackend === 'daytona' ? (defaultDaytonaWorkspace || '/workspace') : (defaultWorktree || ''));
           setTitle('');
+          setDaytonaSandboxId('');
         }
       }
 
@@ -1008,16 +1033,39 @@
           ${showForm && html`
             <form class="new-session-form" onSubmit=${handleCreate}>
               <div class="form-group">
+                <label>Runtime</label>
+                <select
+                  class="input"
+                  value=${runtimeBackend}
+                  onChange=${(e) => setRuntimeBackend((e.target.value || 'local').toLowerCase())}
+                >
+                  <option value="local">local</option>
+                  <option value="daytona">daytona</option>
+                </select>
+              </div>
+              <div class="form-group">
                 <label>Worktree Path</label>
                 <input
                   class="input"
                   type="text"
                   value=${worktree}
                   onInput=${(e) => setWorktree(e.target.value)}
-                  placeholder="/path/to/project"
+                  placeholder=${runtimeBackend === 'daytona' ? '/workspace' : '/path/to/project'}
                   required
                 />
               </div>
+              ${runtimeBackend === 'daytona' && html`
+                <div class="form-group">
+                  <label>Sandbox ID (optional)</label>
+                  <input
+                    class="input"
+                    type="text"
+                    value=${daytonaSandboxId}
+                    onInput=${(e) => setDaytonaSandboxId(e.target.value)}
+                    placeholder="sbx_xxx"
+                  />
+                </div>
+              `}
               <div class="form-group">
                 <label>Title (optional)</label>
                 <input
@@ -1029,7 +1077,13 @@
                 />
               </div>
               <div class="form-actions">
-                <button type="submit" class="btn" disabled=${!worktree.trim()}>Create</button>
+                <button
+                  type="submit"
+                  class="btn"
+                  disabled=${!(worktree.trim() || (runtimeBackend === 'daytona' && (defaultDaytonaWorkspace || '/workspace')))}
+                >
+                  Create
+                </button>
               </div>
             </form>
           `}

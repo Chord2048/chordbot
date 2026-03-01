@@ -40,6 +40,32 @@ Runtime status API:
 curl http://127.0.0.1:4096/channels/status
 ```
 
+## Runtime Backend (Local / Daytona)
+Sessions now support `runtime.backend = local | daytona`.
+
+Create Daytona session:
+```bash
+curl -X POST http://127.0.0.1:4096/sessions \
+  -H "content-type: application/json" \
+  -d '{
+    "title": "Daytona Session",
+    "worktree": "/workspace",
+    "runtime": {
+      "backend": "daytona",
+      "daytona": {"sandbox_id": null}
+    }
+  }'
+```
+
+Configure Daytona in `config.yaml` (or via `DAYTONA_*` env vars):
+```yaml
+daytona:
+  api_key: ""
+  server_url: ""
+  target: ""
+  default_workspace: "/workspace"
+```
+
 ## Cron Jobs
 Agent can now be periodically awakened to run a task in an existing session.
 

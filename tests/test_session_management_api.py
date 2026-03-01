@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import json
 import os
 import sqlite3
@@ -9,6 +10,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -87,6 +90,76 @@ class SessionManagementApiTests(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200, res.text)
         return res.json()
+
+    def test_create_session_defaults_to_local_runtime(self) -> None:
+        session = self._create_session("Runtime Default")
+        self.assertEqual(session.get("runtime", {}).get("backend"), "local")
+
+    def test_create_daytona_session_returns_sandbox_id(self) -> None:
+        from chordcode.model import SessionRuntime, DaytonaRuntimeConfig
+
+        async def _ensure(session):
+            return session.model_copy(
+                update={"runtime": SessionRuntime(backend="daytona", daytona=DaytonaRuntimeConfig(sandbox_id="sbx-test"))},
+            )
+
+        with patch("chordcode.api.app.daytona_manager.ensure_session_runtime_async", new=AsyncMock(side_effect=_ensure)) as mocked:
+            res = self.client.post(
+                "/sessions",
+                json={
+                    "worktree": "/workspace",
+                    "title": "Daytona Session",
+                    "runtime": {"backend": "daytona"},
+                },
+            )
+            self.assertEqual(res.status_code, 200, res.text)
+            data = res.json()
+            self.assertEqual(data["runtime"]["backend"], "daytona")
+            self.assertEqual(data["runtime"]["daytona"]["sandbox_id"], "sbx-test")
+            self.assertEqual(mocked.await_count, 1)
+
+    def test_create_daytona_session_rolls_back_when_runtime_init_fails(self) -> None:
+        from chordcode.runtime import DaytonaOperationError
+
+        with patch(
+            "chordcode.api.app.daytona_manager.ensure_session_runtime_async",
+            new=AsyncMock(side_effect=DaytonaOperationError("daytona failed")),
+        ):
+            res = self.client.post(
+                "/sessions",
+                json={
+                    "worktree": "/workspace",
+                    "title": "Bad Daytona",
+                    "runtime": {"backend": "daytona"},
+                },
+            )
+            self.assertEqual(res.status_code, 502, res.text)
+
+        listed = self.client.get("/sessions")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(len(listed.json().get("sessions", [])), 0)
+
+    def test_build_tools_switches_by_runtime_backend(self) -> None:
+        app_module = importlib.import_module("chordcode.api.app")
+        from chordcode.model import SessionRuntime, DaytonaRuntimeConfig
+        from chordcode.tools.bash import BashTool
+        from chordcode.tools.daytona import DaytonaBashTool
+
+        session = self._create_session("Tool Runtime")
+        session_obj = asyncio.run(app_module.store.get_session(session["id"]))
+        tools_local = asyncio.run(app_module._build_tools(session_obj))
+        self.assertIsInstance(tools_local.get("bash"), BashTool)
+
+        session_daytona = session_obj.model_copy(
+            update={"runtime": SessionRuntime(backend="daytona", daytona=DaytonaRuntimeConfig(sandbox_id="sbx-1"))},
+        )
+        fake_sandbox_ref = SimpleNamespace(sandbox_id="sbx-1", sandbox=SimpleNamespace(process=SimpleNamespace(), fs=SimpleNamespace()))
+        with patch(
+            "chordcode.api.app.daytona_manager.get_sandbox_for_session",
+            new=AsyncMock(return_value=fake_sandbox_ref),
+        ):
+            tools_daytona = asyncio.run(app_module._build_tools(session_daytona))
+            self.assertIsInstance(tools_daytona.get("bash"), DaytonaBashTool)
 
     def test_rename_session(self) -> None:
         session = self._create_session("Before Rename")
