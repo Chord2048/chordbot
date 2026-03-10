@@ -137,6 +137,13 @@
       return 'just now';
     }
 
+    function shortId(value, len = 8) {
+      if (!value) return '';
+      const text = String(value);
+      if (text.length <= len) return text;
+      return text.slice(0, len);
+    }
+
     function formatDuration(ms) {
       if (!ms) return '';
       if (ms < 1000) return ms + 'ms';
@@ -830,6 +837,9 @@
 
     // ============ Header ============
     function Header({ session, status, onToggleObservability, observabilityCollapsed }) {
+      const isDaytona = !!(session && session.runtime && session.runtime.backend === 'daytona');
+      const sandboxId = isDaytona ? (session.runtime.daytona && session.runtime.daytona.sandbox_id) : '';
+      const sandboxName = isDaytona ? (session.runtime.daytona && session.runtime.daytona.sandbox_name) : '';
       return html`
         <header class="app-header">
           <div class="header-left">
@@ -843,6 +853,12 @@
               <div class="session-info">
                 <span class="title">${session.title}</span>
                 <span class="badge">${session.worktree.split('/').pop()}</span>
+                ${isDaytona && html`<span class="badge badge-accent">daytona</span>`}
+                ${isDaytona && sandboxId && html`
+                  <span class="session-runtime-meta">
+                    sbx ${sandboxId}${sandboxName ? ' (' + sandboxName + ')' : ''}
+                  </span>
+                `}
               </div>
             `}
           </div>
@@ -968,12 +984,15 @@
       }, [defaultWorktree]);
 
       useEffect(() => {
-        if (runtimeBackend === 'daytona') {
-          setWorktree(prev => prev || defaultDaytonaWorkspace || '/workspace');
-        } else if (runtimeBackend === 'local') {
-          setWorktree(prev => prev || defaultWorktree || '');
+        if (runtimeBackend === 'daytona' && (!worktree || worktree === defaultWorktree)) {
+          setWorktree(defaultDaytonaWorkspace || '/workspace');
+        } else if (
+          runtimeBackend === 'local' &&
+          (!worktree || worktree === (defaultDaytonaWorkspace || '/workspace'))
+        ) {
+          setWorktree(defaultWorktree || '');
         }
-      }, [runtimeBackend, defaultWorktree, defaultDaytonaWorkspace]);
+      }, [runtimeBackend, defaultWorktree, defaultDaytonaWorkspace, worktree]);
 
       useEffect(() => {
         if (editingSessionId && !sessions.some(s => s.id === editingSessionId)) {
@@ -990,6 +1009,16 @@
           setWorktree(runtimeBackend === 'daytona' ? (defaultDaytonaWorkspace || '/workspace') : (defaultWorktree || ''));
           setTitle('');
           setDaytonaSandboxId('');
+        }
+      }
+
+      function handleRuntimeChange(nextValue) {
+        const next = (nextValue || 'local').toLowerCase();
+        setRuntimeBackend(next);
+        if (next === 'daytona') {
+          setWorktree(defaultDaytonaWorkspace || '/workspace');
+        } else {
+          setWorktree(defaultWorktree || '');
         }
       }
 
@@ -1037,7 +1066,7 @@
                 <select
                   class="input"
                   value=${runtimeBackend}
-                  onChange=${(e) => setRuntimeBackend((e.target.value || 'local').toLowerCase())}
+                  onChange=${(e) => handleRuntimeChange(e.target.value)}
                 >
                   <option value="local">local</option>
                   <option value="daytona">daytona</option>
@@ -1099,6 +1128,9 @@
               `}
               ${sessions.map(s => {
                 const isEditing = editingSessionId === s.id;
+                const isDaytona = !!(s.runtime && s.runtime.backend === 'daytona');
+                const sandboxId = isDaytona ? (s.runtime.daytona && s.runtime.daytona.sandbox_id) : '';
+                const sandboxName = isDaytona ? (s.runtime.daytona && s.runtime.daytona.sandbox_name) : '';
                 return html`
                   <div
                     key=${s.id}
@@ -1151,8 +1183,19 @@
                           </div>
                         </form>
                       ` : html`
-                        <div class="session-item-title">${s.title}</div>
+                        <div class="session-item-title">
+                          <span class="session-title-text" title=${s.title}>${s.title}</span>
+                          ${isDaytona && html`<span class="session-runtime-badge">daytona</span>`}
+                        </div>
                         <div class="session-item-meta">${formatRelative(s.updated_at)}</div>
+                        ${isDaytona && sandboxId && html`
+                          <div
+                            class="session-item-meta session-runtime-line"
+                            title=${"sandbox: " + sandboxId + (sandboxName ? " (" + sandboxName + ")" : "")}
+                          >
+                            sbx ${shortId(sandboxId)}${sandboxName ? ' · ' + sandboxName : ''}
+                          </div>
+                        `}
                       `}
                     </div>
                     ${!isEditing && html`

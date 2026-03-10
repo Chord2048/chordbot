@@ -3,6 +3,8 @@ from __future__ import annotations
 import posixpath
 import unittest
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from chordcode.tools.daytona import (
@@ -68,9 +70,19 @@ class FakeProcess:
 
 
 class FakeFS:
-    def __init__(self, files: dict[str, str]) -> None:
+    def __init__(
+        self,
+        files: dict[str, str],
+        *,
+        search_error: Exception | None = None,
+        find_error: Exception | None = None,
+    ) -> None:
         self._files = dict(files)
         self._folders: set[str] = {"/"}
+        self.search_calls: list[tuple[str, str]] = []
+        self.find_calls: list[tuple[str, str]] = []
+        self._search_error = search_error
+        self._find_error = find_error
         for p in files:
             cur = posixpath.dirname(p)
             while cur and cur != "/":
@@ -83,10 +95,16 @@ class FakeFS:
             raise FileNotFoundError(path)
         return self._files[path]
 
-    def upload_file(self, path: str, data: bytes):
-        self._files[path] = data.decode("utf-8")
+    def upload_file(self, src, dst: str, timeout: int = 1800):  # noqa: ARG002
+        if isinstance(src, bytes):
+            data = src
+        elif isinstance(src, str):
+            data = src.encode("utf-8")
+        else:
+            raise TypeError("unsupported src")
+        self._files[dst] = data.decode("utf-8")
 
-    def create_folder(self, path: str):
+    def create_folder(self, path: str, mode: str):  # noqa: ARG002
         self._folders.add(path)
 
     def list_files(self, path: str):
@@ -121,6 +139,39 @@ class FakeFS:
                     "is_dir": child in self._folders,
                 },
             )
+        return out
+
+    def search_files(self, path: str, pattern: str):
+        self.search_calls.append((path, pattern))
+        if self._search_error:
+            raise self._search_error
+
+        root = posixpath.normpath(path)
+        candidates = set(self._files.keys()) | set(self._folders)
+        out: list[str] = []
+        for candidate in sorted(candidates):
+            if candidate == root:
+                continue
+            if not candidate.startswith(root.rstrip("/") + "/"):
+                continue
+            name = posixpath.basename(candidate)
+            if fnmatch(name, pattern):
+                out.append(candidate)
+        return SimpleNamespace(files=out)
+
+    def find_files(self, path: str, pattern: str):
+        self.find_calls.append((path, pattern))
+        if self._find_error:
+            raise self._find_error
+
+        root = posixpath.normpath(path)
+        out: list[dict[str, object]] = []
+        for file_path, content in sorted(self._files.items()):
+            if not file_path.startswith(root.rstrip("/") + "/"):
+                continue
+            for idx, line in enumerate(content.splitlines(), start=1):
+                if pattern in line:
+                    out.append({"file": file_path, "line": idx, "content": line})
         return out
 
 
@@ -158,15 +209,28 @@ class DaytonaToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sandbox.fs.download_file("/workspace/b.txt"), "ok")
         self.assertTrue(any(a["permission"] == "write" for a in tool_ctx.asks))
 
-    async def test_glob_uses_rg_when_available(self) -> None:
+    async def test_write_creates_parent_folder_then_uploads_bytes(self) -> None:
         manager = FakeManager()
-        process = FakeProcess(
-            {
-                "command -v rg": (0, "/usr/bin/rg\n", ""),
-                "rg --files --hidden --no-messages --glob '*.py' /workspace": (0, "/workspace/a.py\n/workspace/sub/b.py\n", ""),
-            },
+        sandbox = FakeSandbox(process=FakeProcess({}), fs=FakeFS({}))
+        ctx = DaytonaCtx(
+            worktree="/worktree",
+            cwd="/worktree",
+            sandbox=sandbox,
+            sandbox_id="sbx2",
+            manager=manager,
         )
-        sandbox = FakeSandbox(process=process, fs=FakeFS({}))
+        tool_ctx = FakeToolCtx()
+        await DaytonaWriteTool(ctx).execute({"file_path": "/worktree/test.md", "content": "hello"}, tool_ctx)
+        self.assertEqual(sandbox.fs.download_file("/worktree/test.md"), "hello")
+
+    async def test_glob_uses_search_files(self) -> None:
+        manager = FakeManager()
+        files = {
+            "/workspace/a.py": "print('a')\n",
+            "/workspace/sub/b.py": "print('b')\n",
+            "/workspace/c.txt": "x\n",
+        }
+        sandbox = FakeSandbox(process=FakeProcess({}), fs=FakeFS(files))
         ctx = DaytonaCtx(
             worktree="/workspace",
             cwd="/workspace",
@@ -177,28 +241,20 @@ class DaytonaToolsTests(unittest.IsolatedAsyncioTestCase):
         tool_ctx = FakeToolCtx()
         out = await DaytonaGlobTool(ctx).execute({"pattern": "*.py", "path": "/workspace"}, tool_ctx)
         self.assertIn("/workspace/a.py", out.output)
-        self.assertEqual(manager.get_cached_rg_available("sbx1"), True)
-        self.assertIn("rg --files --hidden --no-messages --glob '*.py' /workspace", process.commands)
+        self.assertIn("/workspace/sub/b.py", out.output)
+        self.assertEqual(sandbox.fs.search_calls, [("/workspace", "*.py")])
 
-    async def test_glob_fallback_when_rg_install_fails_and_warns(self) -> None:
+    async def test_glob_fallback_when_search_files_fails_and_warns(self) -> None:
         manager = FakeManager()
-        process = FakeProcess(
-            {
-                "command -v rg": (1, "", ""),
-                "apt-get update && apt-get install -y ripgrep": (1, "", "no apt"),
-                "apk add --no-cache ripgrep": (1, "", "no apk"),
-                "dnf install -y ripgrep": (1, "", "no dnf"),
-                "yum install -y ripgrep": (1, "", "no yum"),
-                "microdnf install -y ripgrep": (1, "", "no microdnf"),
-                "pacman -Sy --noconfirm ripgrep": (1, "", "no pacman"),
-            },
-        )
         files = {
             "/workspace/a.py": "print('a')\n",
             "/workspace/sub/b.py": "print('b')\n",
             "/workspace/c.txt": "x\n",
         }
-        sandbox = FakeSandbox(process=process, fs=FakeFS(files))
+        sandbox = FakeSandbox(
+            process=FakeProcess({}),
+            fs=FakeFS(files, search_error=RuntimeError("search unavailable")),
+        )
         ctx = DaytonaCtx(
             worktree="/workspace",
             cwd="/workspace",
@@ -217,11 +273,30 @@ class DaytonaToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/workspace/a.py", out2.output)
 
         events = [call.kwargs.get("event") for call in warning_mock.mock_calls]
-        self.assertEqual(events.count("daytona.rg.missing"), 1)
-        self.assertEqual(events.count("daytona.rg.install_failed"), 1)
-        self.assertGreaterEqual(events.count("daytona.glob.fallback_emulation"), 2)
+        self.assertGreaterEqual(events.count("daytona.glob.search_files_fallback"), 2)
 
-    async def test_grep_fallback_without_rg(self) -> None:
+    async def test_grep_uses_find_files_with_include_filter(self) -> None:
+        manager = FakeManager()
+        files = {
+            "/workspace/main.py": "hello from py\n",
+            "/workspace/notes.txt": "hello from txt\n",
+        }
+        sandbox = FakeSandbox(process=FakeProcess({}), fs=FakeFS(files))
+        ctx = DaytonaCtx(
+            worktree="/workspace",
+            cwd="/workspace",
+            sandbox=sandbox,
+            sandbox_id="sbx1",
+            manager=manager,
+        )
+        tool_ctx = FakeToolCtx()
+        out = await DaytonaGrepTool(ctx).execute({"pattern": "hello", "include": "*.py"}, tool_ctx)
+        self.assertIn("Found 1 matches", out.output)
+        self.assertIn("/workspace/main.py", out.output)
+        self.assertNotIn("/workspace/notes.txt", out.output)
+        self.assertEqual(sandbox.fs.find_calls, [("/workspace", "hello")])
+
+    async def test_grep_fallback_without_find_files_and_without_rg(self) -> None:
         manager = FakeManager()
         process = FakeProcess(
             {
@@ -238,7 +313,7 @@ class DaytonaToolsTests(unittest.IsolatedAsyncioTestCase):
             "/workspace/main.py": "hello from py\n",
             "/workspace/notes.txt": "hello from txt\n",
         }
-        sandbox = FakeSandbox(process=process, fs=FakeFS(files))
+        sandbox = FakeSandbox(process=process, fs=FakeFS(files, find_error=RuntimeError("no find_files")))
         ctx = DaytonaCtx(
             worktree="/workspace",
             cwd="/workspace",
@@ -247,10 +322,13 @@ class DaytonaToolsTests(unittest.IsolatedAsyncioTestCase):
             manager=manager,
         )
         tool_ctx = FakeToolCtx()
-        out = await DaytonaGrepTool(ctx).execute({"pattern": "hello", "include": "*.py"}, tool_ctx)
+        with patch("chordcode.tools.daytona.logger.warning") as warning_mock:
+            out = await DaytonaGrepTool(ctx).execute({"pattern": "hello", "include": "*.py"}, tool_ctx)
         self.assertIn("Found 1 matches", out.output)
         self.assertIn("/workspace/main.py", out.output)
         self.assertNotIn("/workspace/notes.txt", out.output)
+        events = [call.kwargs.get("event") for call in warning_mock.mock_calls]
+        self.assertIn("daytona.grep.find_files_fallback", events)
 
 
 if __name__ == "__main__":

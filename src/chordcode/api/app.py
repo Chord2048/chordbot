@@ -149,6 +149,26 @@ async def _get_session_or_404(session_id: str) -> Session:
         raise HTTPException(status_code=404, detail=detail)
 
 
+async def _refresh_daytona_runtime_metadata(session: Session) -> Session:
+    if session.runtime.backend != "daytona":
+        return session
+    daytona_cfg = session.runtime.daytona
+    if not daytona_cfg or not daytona_cfg.sandbox_id:
+        return session
+    if daytona_cfg.sandbox_name:
+        return session
+    try:
+        return await daytona_manager.ensure_session_runtime_async(session)
+    except Exception as exc:
+        logger.warning(
+            "Failed to refresh Daytona session runtime metadata",
+            event="daytona.session.metadata.refresh_failed",
+            session_id=session.id,
+            error=str(exc),
+        )
+        return session
+
+
 async def _get_session_lock(session_id: str) -> asyncio.Lock:
     async with _session_locks_guard:
         lock = _session_locks.get(session_id)
@@ -733,7 +753,12 @@ async def create_session(body: CreateSessionRequest):
     title = body.title.strip() or "New session"
     if runtime_backend == "daytona":
         default_workspace = cfg.daytona.default_workspace or "/workspace"
-        worktree = raw_worktree or default_workspace
+        # When frontend toggles from local->daytona, it may still carry local default_worktree.
+        # In that case treat it as "unset" and fall back to remote default workspace.
+        if raw_worktree and raw_worktree != cfg.default_worktree:
+            worktree = raw_worktree
+        else:
+            worktree = default_workspace
         cwd = body.cwd.strip() or worktree
         if not worktree.startswith("/") or not cwd.startswith("/"):
             raise HTTPException(status_code=400, detail="daytona worktree/cwd must be absolute remote paths")
@@ -741,6 +766,7 @@ async def create_session(body: CreateSessionRequest):
             backend="daytona",
             daytona=DaytonaRuntimeConfig(
                 sandbox_id=requested_runtime.daytona.sandbox_id if requested_runtime.daytona else None,
+                sandbox_name=requested_runtime.daytona.sandbox_name if requested_runtime.daytona else None,
             ),
         )
     else:
@@ -784,6 +810,10 @@ async def create_session(body: CreateSessionRequest):
 async def list_sessions(limit: int = 50, offset: int = 0):
     """List all sessions, ordered by updated_at desc."""
     sessions = await store.list_sessions(limit=limit, offset=offset)
+    refreshed: list[Session] = []
+    for s in sessions:
+        refreshed.append(await _refresh_daytona_runtime_metadata(s))
+    sessions = refreshed
     return {"sessions": [s.model_dump() for s in sessions]}
 
 
@@ -849,7 +879,9 @@ async def interrupt_session(session_id: str):
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
-    return await store.get_session(session_id)
+    s = await store.get_session(session_id)
+    s = await _refresh_daytona_runtime_metadata(s)
+    return s
 
 
 @app.get("/sessions/{session_id}/messages")

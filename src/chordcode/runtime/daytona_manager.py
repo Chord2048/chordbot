@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, cast
 
 from chordcode.config import DaytonaConfig
 from chordcode.model import Session, SessionRuntime, DaytonaRuntimeConfig
@@ -19,7 +19,14 @@ class DaytonaOperationError(RuntimeError):
 @dataclass(frozen=True)
 class DaytonaSandboxRef:
     sandbox_id: str
+    sandbox_name: str | None
     sandbox: Any
+
+
+class DaytonaClientLike(Protocol):
+    def get(self, sandbox_id: str) -> Any: ...
+    def find_one(self, sandbox_id: str) -> Any: ...
+    def create(self, req: Any | None = None) -> Any: ...
 
 
 class DaytonaManager:
@@ -32,25 +39,37 @@ class DaytonaManager:
 
     def _build_client(self) -> Any:
         try:
-            from daytona import Daytona  # type: ignore
+            from daytona import Daytona, DaytonaConfig  # type: ignore
         except Exception as exc:
             raise DaytonaUnavailableError("daytona package is not installed") from exc
 
-        kwargs: dict[str, Any] = {}
+        cfg_kwargs: dict[str, Any] = {}
         if self._cfg.api_key:
-            kwargs["api_key"] = self._cfg.api_key
-        if self._cfg.server_url:
-            kwargs["server_url"] = self._cfg.server_url
+            cfg_kwargs["api_key"] = self._cfg.api_key
         if self._cfg.target:
-            kwargs["target"] = self._cfg.target
+            cfg_kwargs["target"] = self._cfg.target
+
+        config_obj: Any | None = None
+        config_error: Exception | None = None
+        if self._cfg.server_url:
+            # Prefer api_url (newer SDK), fallback to server_url (older SDK).
+            for url_key in ("api_url", "server_url"):
+                try:
+                    config_obj = DaytonaConfig(**{**cfg_kwargs, url_key: self._cfg.server_url})
+                    break
+                except TypeError as exc:
+                    config_error = exc
+        if config_obj is None:
+            try:
+                config_obj = DaytonaConfig(**cfg_kwargs)
+            except Exception as exc:
+                config_error = exc
+
+        if config_obj is None:
+            raise DaytonaOperationError(f"failed to initialize daytona client: {config_error}")
 
         try:
-            return Daytona(**kwargs)
-        except TypeError:
-            try:
-                return Daytona()
-            except Exception as exc:
-                raise DaytonaOperationError(f"failed to initialize daytona client: {exc}") from exc
+            return Daytona(config=config_obj)
         except Exception as exc:
             raise DaytonaOperationError(f"failed to initialize daytona client: {exc}") from exc
 
@@ -67,60 +86,49 @@ class DaytonaManager:
                 return value
         return None
 
+    @staticmethod
+    def _sandbox_name_from_obj(obj: Any) -> str | None:
+        for key in ("name", "sandbox_name", "sandboxName"):
+            value = getattr(obj, key, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     def _find_sandbox(self, sandbox_id: str) -> Any:
-        client = self._client_or_create()
+        client = cast(DaytonaClientLike, self._client_or_create())
+        try:
+            sandbox = client.get(sandbox_id)
+            if sandbox:
+                return sandbox
+        except Exception:
+            pass
 
-        getter = getattr(client, "get", None)
-        if callable(getter):
-            try:
-                sandbox = getter(sandbox_id)
-                if sandbox:
-                    return sandbox
-            except Exception:
-                pass
-
-        find_one = getattr(client, "find_one", None)
-        if callable(find_one):
-            for params in (
-                {"id": sandbox_id},
-                {"sandbox_id": sandbox_id},
-                {"sandboxId": sandbox_id},
-            ):
-                try:
-                    sandbox = find_one(params)
-                    if sandbox:
-                        return sandbox
-                except Exception:
-                    continue
+        try:
+            sandbox = client.find_one(sandbox_id)
+            if sandbox:
+                return sandbox
+        except Exception:
+            pass
 
         raise DaytonaOperationError(f"daytona sandbox not found: {sandbox_id}")
 
     def _create_sandbox(self) -> DaytonaSandboxRef:
-        client = self._client_or_create()
-        create = getattr(client, "create", None)
-        if callable(create):
-            for payload in (None, {}):
-                try:
-                    sandbox = create() if payload is None else create(payload)
-                    sid = self._sandbox_id_from_obj(sandbox)
-                    if sid and sandbox:
-                        return DaytonaSandboxRef(sandbox_id=sid, sandbox=sandbox)
-                except TypeError:
-                    continue
-                except Exception as exc:
-                    raise DaytonaOperationError(f"failed to create daytona sandbox: {exc}") from exc
+        client = cast(DaytonaClientLike, self._client_or_create())
+        try:
+            sandbox = client.create()
+        except TypeError:
+            sandbox = client.create(None)
+        except Exception as exc:
+            raise DaytonaOperationError(f"failed to create daytona sandbox: {exc}") from exc
 
-        create_sandbox = getattr(client, "create_sandbox", None)
-        if callable(create_sandbox):
-            try:
-                sandbox = create_sandbox()
-                sid = self._sandbox_id_from_obj(sandbox)
-                if sid and sandbox:
-                    return DaytonaSandboxRef(sandbox_id=sid, sandbox=sandbox)
-            except Exception as exc:
-                raise DaytonaOperationError(f"failed to create daytona sandbox: {exc}") from exc
-
-        raise DaytonaOperationError("daytona client does not expose sandbox create APIs")
+        sid = self._sandbox_id_from_obj(sandbox)
+        if sid and sandbox:
+            return DaytonaSandboxRef(
+                sandbox_id=sid,
+                sandbox_name=self._sandbox_name_from_obj(sandbox),
+                sandbox=sandbox,
+            )
+        raise DaytonaOperationError("failed to create daytona sandbox: missing sandbox id")
 
     async def ensure_session_runtime_async(self, session: Session) -> Session:
         if session.runtime.backend != "daytona":
@@ -130,13 +138,21 @@ class DaytonaManager:
 
         sandbox_id = session.runtime.daytona.sandbox_id if session.runtime.daytona else None
         if sandbox_id:
-            self._find_sandbox(sandbox_id)
+            sandbox = self._find_sandbox(sandbox_id)
+            sandbox_name = self._sandbox_name_from_obj(sandbox)
+            current_name = session.runtime.daytona.sandbox_name if session.runtime.daytona else None
+            if sandbox_name and sandbox_name != current_name:
+                runtime = SessionRuntime(
+                    backend="daytona",
+                    daytona=DaytonaRuntimeConfig(sandbox_id=sandbox_id, sandbox_name=sandbox_name),
+                )
+                return await self._store.update_session_runtime(session.id, runtime.backend, runtime.model_dump())
             return session
 
         created = self._create_sandbox()
         runtime = SessionRuntime(
             backend="daytona",
-            daytona=DaytonaRuntimeConfig(sandbox_id=created.sandbox_id),
+            daytona=DaytonaRuntimeConfig(sandbox_id=created.sandbox_id, sandbox_name=created.sandbox_name),
         )
         return await self._store.update_session_runtime(session.id, runtime.backend, runtime.model_dump())
 
@@ -146,7 +162,8 @@ class DaytonaManager:
         if not sandbox_id:
             raise DaytonaOperationError("daytona runtime missing sandbox_id")
         sandbox = self._find_sandbox(sandbox_id)
-        return DaytonaSandboxRef(sandbox_id=sandbox_id, sandbox=sandbox)
+        sandbox_name = self._sandbox_name_from_obj(sandbox)
+        return DaytonaSandboxRef(sandbox_id=sandbox_id, sandbox_name=sandbox_name, sandbox=sandbox)
 
     def get_cached_rg_available(self, sandbox_id: str) -> bool | None:
         return self._rg_available.get(sandbox_id)

@@ -266,12 +266,19 @@ class SessionLoop:
             current_reasoning_part: ReasoningPart | None = None
 
             try:
+                prompt_worktree = session.worktree
+                if (
+                    session.runtime.backend == "daytona"
+                    and (not prompt_worktree or prompt_worktree == self._cfg.default_worktree)
+                ):
+                    prompt_worktree = self._cfg.daytona.default_workspace or "/workspace"
+
                 system = render_prompt(
                     self._cfg.system_prompt,
                     session_context={
                         "session_id": session_id,
                         "cwd": session.cwd,
-                        "worktree": session.worktree,
+                        "worktree": prompt_worktree,
                         "model": self._cfg.openai.model,
                         "agent": agent,
                     },

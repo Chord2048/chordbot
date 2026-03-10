@@ -3,10 +3,11 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Protocol, cast
 
 from chordcode.log import logger
 from chordcode.runtime import DaytonaManager
@@ -15,6 +16,9 @@ from chordcode.tools.truncate import truncate
 
 _MAX_RESULTS = 100
 _MAX_LINE_LENGTH = 2000
+_LOG_PREVIEW_MAX = 200
+
+_log = logger.child(service="tool.daytona")
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,31 @@ class DaytonaCtx:
     sandbox: Any
     sandbox_id: str
     manager: DaytonaManager
+
+
+class DaytonaProcessLike(Protocol):
+    def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> Any: ...
+
+
+class DaytonaExecResultLike(Protocol):
+    exit_code: int
+    result: str | None
+    stderr: str | None
+
+
+class DaytonaFsLike(Protocol):
+    def download_file(self, path: str) -> bytes | str | None: ...
+    def upload_file(self, src: bytes, dst: str, timeout: int = 1800) -> None: ...
+    def create_folder(self, path: str, mode: str) -> None: ...
+    def list_files(self, path: str) -> Any: ...
+    def search_files(self, path: str, pattern: str) -> Any: ...
+    def find_files(self, path: str, pattern: str) -> list[Any]: ...
 
 
 def _resolve_remote_path(*, cwd: str, file_path: str) -> str:
@@ -47,62 +76,42 @@ def _is_within_remote(*, root: str, path: str) -> bool:
         return False
 
 
-def _extract_items(value: Any) -> list[Any]:
-    if value is None:
-        return []
+def _dict_or_attr(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _list_items(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     if isinstance(value, tuple):
         return list(value)
-    if isinstance(value, dict):
-        for key in ("items", "files", "results", "data"):
-            v = value.get(key)
-            if isinstance(v, list):
-                return v
-    for key in ("items", "files", "results", "data"):
-        v = getattr(value, key, None)
-        if isinstance(v, list):
-            return v
+    files = _dict_or_attr(value, "files")
+    if isinstance(files, list):
+        return files
     return []
 
 
-def _entry_get(entry: Any, *keys: str) -> Any:
-    if isinstance(entry, dict):
-        for key in keys:
-            if key in entry:
-                return entry[key]
-        return None
-    for key in keys:
-        v = getattr(entry, key, None)
-        if v is not None:
-            return v
-    return None
-
-
 def _entry_is_dir(entry: Any) -> bool:
-    value = _entry_get(entry, "is_dir", "isDir", "directory")
+    value = _dict_or_attr(entry, "is_dir")
     if isinstance(value, bool):
         return value
-    typ = _entry_get(entry, "type", "kind")
-    if isinstance(typ, str):
-        return typ.lower() in {"dir", "directory", "folder"}
-    return False
-
-
-def _entry_name(entry: Any) -> str | None:
-    v = _entry_get(entry, "name", "filename", "file_name")
-    if isinstance(v, str) and v:
-        return v
-    return None
+    # SDK fields can vary across versions (`isDir` or `type`).
+    value = _dict_or_attr(entry, "isDir")
+    if isinstance(value, bool):
+        return value
+    typ = _dict_or_attr(entry, "type")
+    return isinstance(typ, str) and typ.lower() in {"dir", "directory", "folder"}
 
 
 def _entry_path(base: str, entry: Any) -> str:
-    v = _entry_get(entry, "path", "full_path", "fullPath")
-    if isinstance(v, str) and v:
-        return posixpath.normpath(v)
-    name = _entry_name(entry)
-    if name:
-        return posixpath.normpath(posixpath.join(base, name))
+    raw_path = _dict_or_attr(entry, "path")
+    if isinstance(raw_path, str) and raw_path:
+        return posixpath.normpath(raw_path)
+    raw_name = _dict_or_attr(entry, "name")
+    if isinstance(raw_name, str) and raw_name:
+        return posixpath.normpath(posixpath.join(base, raw_name))
     return posixpath.normpath(base)
 
 
@@ -117,149 +126,111 @@ def _extract_exec(result: Any) -> tuple[int, str, str]:
         err = str(result[2] or "") if len(result) >= 3 else ""
         return code, out, err
 
-    code = _entry_get(result, "exit_code", "exitCode", "returncode", "code", "status")
-    out = _entry_get(result, "result", "stdout", "output", "out")
-    err = _entry_get(result, "stderr", "error", "err")
+    if isinstance(result, dict):
+        code = result.get("exit_code", 0)
+        out = result.get("result", "")
+        err = result.get("stderr", "")
+        try:
+            code_int = int(code or 0)
+        except Exception:
+            code_int = 0
+        return code_int, str(out or ""), str(err or "")
+
+    typed = cast(DaytonaExecResultLike, result)
     try:
-        code_int = int(code) if code is not None else 0
+        code = int(getattr(typed, "exit_code", 0) or 0)
     except Exception:
-        code_int = 0
-    return code_int, str(out or ""), str(err or "")
+        code = 0
+    out = str(getattr(typed, "result", "") or "")
+    err = str(getattr(typed, "stderr", "") or "")
+    return code, out, err
 
 
 def _process_exec(sandbox: Any, command: str, *, cwd: str, timeout_ms: int | None = None) -> tuple[int, str, str]:
-    process = getattr(sandbox, "process", None)
-    exec_fn = getattr(process, "exec", None)
-    if not callable(exec_fn):
-        raise RuntimeError("daytona sandbox process.exec is unavailable")
-
-    errors: list[str] = []
-    kwargs_variants: list[dict[str, Any]] = [
-        {"command": command, "cwd": cwd, "timeout": timeout_ms},
-        {"command": command, "cwd": cwd},
-        {"command": command},
-    ]
-    for kwargs in kwargs_variants:
-        try:
-            result = exec_fn(**kwargs)
-            return _extract_exec(result)
-        except TypeError as exc:
-            errors.append(str(exc))
-            continue
-        except Exception as exc:
-            raise RuntimeError(f"daytona process execution failed: {exc}") from exc
-
-    args_variants: list[tuple[Any, ...]] = [
-        (command, cwd, timeout_ms),
-        (command, cwd),
-        (command,),
-    ]
-    for args in args_variants:
-        try:
-            result = exec_fn(*args)
-            return _extract_exec(result)
-        except TypeError as exc:
-            errors.append(str(exc))
-            continue
-        except Exception as exc:
-            raise RuntimeError(f"daytona process execution failed: {exc}") from exc
-
-    raise RuntimeError(f"daytona process.exec signature mismatch: {'; '.join(errors)}")
+    try:
+        process = cast(DaytonaProcessLike, sandbox.process)
+        result = process.exec(command=command, cwd=cwd, timeout=timeout_ms)
+        return _extract_exec(result)
+    except Exception as exc:
+        raise RuntimeError(f"daytona process execution failed: {exc}") from exc
 
 
 def _fs_download(fs: Any, path: str) -> str:
-    fn = getattr(fs, "download_file", None)
-    if not callable(fn):
-        raise RuntimeError("daytona sandbox fs.download_file is unavailable")
-
-    for kwargs in ({"path": path}, {}):
-        try:
-            if kwargs:
-                result = fn(**kwargs)
-            else:
-                result = fn(path)
-            if isinstance(result, bytes):
-                return result.decode("utf-8", errors="replace")
-            if isinstance(result, bytearray):
-                return bytes(result).decode("utf-8", errors="replace")
-            if isinstance(result, str):
-                return result
-            if isinstance(result, dict):
-                body = result.get("content") or result.get("data")
-                if isinstance(body, (bytes, bytearray)):
-                    return bytes(body).decode("utf-8", errors="replace")
-                if body is not None:
-                    return str(body)
-            body = _entry_get(result, "content", "data")
-            if isinstance(body, (bytes, bytearray)):
-                return bytes(body).decode("utf-8", errors="replace")
-            if body is not None:
-                return str(body)
-            return str(result)
-        except TypeError:
-            continue
-    raise RuntimeError("daytona fs.download_file call failed")
+    try:
+        typed_fs = cast(DaytonaFsLike, fs)
+        result = typed_fs.download_file(path)
+    except Exception as exc:
+        raise RuntimeError(f"daytona fs.download_file failed: {exc}") from exc
+    if result is None:
+        return ""
+    if isinstance(result, (bytes, bytearray)):
+        return bytes(result).decode("utf-8", errors="replace")
+    return str(result)
 
 
 def _fs_upload(fs: Any, path: str, content: str) -> None:
-    fn = getattr(fs, "upload_file", None)
-    if not callable(fn):
-        raise RuntimeError("daytona sandbox fs.upload_file is unavailable")
-
     data = content.encode("utf-8")
-    variants: list[tuple[tuple[Any, ...], dict[str, Any]]] = [
-        ((), {"path": path, "data": data}),
-        ((), {"path": path, "content": data}),
-        ((path, data), {}),
-        ((path, content), {}),
-    ]
-    for args, kwargs in variants:
-        try:
-            fn(*args, **kwargs)
-            return
-        except TypeError:
-            continue
-    raise RuntimeError("daytona fs.upload_file call failed")
+    try:
+        typed_fs = cast(DaytonaFsLike, fs)
+        typed_fs.upload_file(data, path)
+    except Exception as exc:
+        raise RuntimeError(f"daytona fs.upload_file failed: {exc}") from exc
 
 
 def _fs_mkdir(fs: Any, path: str) -> None:
-    fn = getattr(fs, "create_folder", None)
-    if not callable(fn):
-        fn = getattr(fs, "mkdir", None)
-    if not callable(fn):
+    typed_fs = cast(DaytonaFsLike, fs)
+    norm = posixpath.normpath(path or "")
+    if not norm or norm == "/":
         return
-    variants: list[tuple[tuple[Any, ...], dict[str, Any]]] = [
-        ((), {"path": path}),
-        ((path,), {}),
-    ]
-    for args, kwargs in variants:
+    parts = [p for p in norm.split("/") if p]
+    cursor = ""
+    for part in parts:
+        cursor = f"{cursor}/{part}" if cursor else f"/{part}"
         try:
-            fn(*args, **kwargs)
-            return
-        except TypeError:
-            continue
+            typed_fs.create_folder(cursor, "755")
         except Exception:
-            return
+            # Directory may already exist; continue recursively.
+            continue
 
 
 def _fs_list(fs: Any, path: str) -> list[Any]:
-    fn = getattr(fs, "list_files", None)
-    if not callable(fn):
-        fn = getattr(fs, "list", None)
-    if not callable(fn):
+    try:
+        typed_fs = cast(DaytonaFsLike, fs)
+        result = typed_fs.list_files(path)
+        return _list_items(result)
+    except Exception:
         return []
 
-    variants: list[tuple[tuple[Any, ...], dict[str, Any]]] = [
-        ((), {"path": path}),
-        ((path,), {}),
-    ]
-    for args, kwargs in variants:
-        try:
-            result = fn(*args, **kwargs)
-            return _extract_items(result)
-        except TypeError:
+
+def _fs_search_files(fs: Any, path: str, pattern: str) -> list[str]:
+    try:
+        typed_fs = cast(DaytonaFsLike, fs)
+        result = typed_fs.search_files(path, pattern)
+        return [str(item).strip() for item in _list_items(result) if str(item).strip()]
+    except Exception as exc:
+        raise RuntimeError(f"daytona fs.search_files failed: {exc}") from exc
+
+
+def _fs_find_files(fs: Any, path: str, pattern: str) -> list[tuple[str, int, str]]:
+    try:
+        typed_fs = cast(DaytonaFsLike, fs)
+        result_value = typed_fs.find_files(path, pattern)
+    except Exception as exc:
+        raise RuntimeError(f"daytona fs.find_files failed: {exc}") from exc
+
+    out: list[tuple[str, int, str]] = []
+    for item in _list_items(result_value):
+        file_path = _dict_or_attr(item, "file")
+        line = _dict_or_attr(item, "line")
+        content = _dict_or_attr(item, "content")
+        if not isinstance(file_path, str) or not file_path.strip():
             continue
-    return []
+        try:
+            line_no = int(line) if line is not None else 0
+        except Exception:
+            line_no = 0
+        out.append((file_path.strip(), max(1, line_no), str(content or "")))
+    return out
 
 
 def _walk_files(fs: Any, root: str) -> list[str]:
@@ -292,13 +263,34 @@ def _match_glob(pattern: str, root: str, file_path: str) -> bool:
     return False
 
 
+def _preview(text: str, limit: int = _LOG_PREVIEW_MAX) -> str:
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
 def _check_rg(ctx: DaytonaCtx, tool_ctx) -> bool:
     cached = ctx.manager.get_cached_rg_available(ctx.sandbox_id)
     if cached is not None:
+        _log.debug(
+            "reuse cached ripgrep availability",
+            event="daytona.rg.cache_hit",
+            session_id=tool_ctx.session_id,
+            sandbox_id=ctx.sandbox_id,
+            available=cached,
+        )
         return cached
 
     code, out, _ = _process_exec(ctx.sandbox, "command -v rg", cwd=ctx.cwd, timeout_ms=10_000)
     if code == 0 and out.strip():
+        _log.info(
+            "ripgrep detected in Daytona sandbox",
+            event="daytona.rg.available",
+            session_id=tool_ctx.session_id,
+            sandbox_id=ctx.sandbox_id,
+            rg_path=out.strip(),
+        )
         ctx.manager.set_cached_rg_available(ctx.sandbox_id, True)
         return True
 
@@ -318,13 +310,37 @@ def _check_rg(ctx: DaytonaCtx, tool_ctx) -> bool:
             "microdnf install -y ripgrep",
             "pacman -Sy --noconfirm ripgrep",
         ]
+        _log.info(
+            "attempting to install ripgrep in Daytona sandbox",
+            event="daytona.rg.install_attempt",
+            session_id=tool_ctx.session_id,
+            sandbox_id=ctx.sandbox_id,
+            attempts=len(install_commands),
+        )
         for install_cmd in install_commands:
-            code, _, _ = _process_exec(ctx.sandbox, install_cmd, cwd=ctx.cwd, timeout_ms=120_000)
+            code, out_text, err_text = _process_exec(ctx.sandbox, install_cmd, cwd=ctx.cwd, timeout_ms=120_000)
+            _log.info(
+                "ripgrep install command finished",
+                event="daytona.rg.install_command",
+                session_id=tool_ctx.session_id,
+                sandbox_id=ctx.sandbox_id,
+                command=install_cmd,
+                returncode=code,
+                stdout_preview=_preview(out_text),
+                stderr_preview=_preview(err_text),
+            )
             if code == 0:
                 break
 
     code, out, _ = _process_exec(ctx.sandbox, "command -v rg", cwd=ctx.cwd, timeout_ms=10_000)
     if code == 0 and out.strip():
+        _log.info(
+            "ripgrep install succeeded",
+            event="daytona.rg.install_succeeded",
+            session_id=tool_ctx.session_id,
+            sandbox_id=ctx.sandbox_id,
+            rg_path=out.strip(),
+        )
         ctx.manager.set_cached_rg_available(ctx.sandbox_id, True)
         return True
 
@@ -380,17 +396,53 @@ class DaytonaBashTool:
         always = [f"{cmd_name}*"] if cmd_name else ["*"]
         await ctx.ask(permission="bash", patterns=[command], always=always, metadata={"workdir": workdir})
 
-        code, out, err = _process_exec(self._ctx.sandbox, command, cwd=workdir, timeout_ms=timeout_ms)
-        output = out or ""
-        if err:
-            output = f"{output}\n{err}".strip()
-        t = truncate(output)
-        await ctx.tool_stream_update(t.content)
-        return ToolResult(
-            title="bash",
-            output=t.content,
-            metadata={"returncode": code, "truncated": t.truncated, "workdir": workdir},
+        t0 = time.monotonic()
+        _log.info(
+            "daytona bash started",
+            event="tool.daytona.bash.start",
+            session_id=ctx.session_id,
+            sandbox_id=self._ctx.sandbox_id,
+            workdir=workdir,
+            timeout_ms=timeout_ms,
+            command_preview=_preview(command),
         )
+        try:
+            code, out, err = _process_exec(self._ctx.sandbox, command, cwd=workdir, timeout_ms=timeout_ms)
+            output = out or ""
+            if err:
+                output = f"{output}\n{err}".strip()
+            t = truncate(output)
+            await ctx.tool_stream_update(t.content)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.info(
+                "daytona bash completed",
+                event="tool.daytona.bash.done",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                returncode=code,
+                output_len=len(t.content),
+                truncated=t.truncated,
+            )
+            return ToolResult(
+                title="bash",
+                output=t.content,
+                metadata={"returncode": code, "truncated": t.truncated, "workdir": workdir},
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.error(
+                "daytona bash failed",
+                event="tool.daytona.bash.error",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                workdir=workdir,
+                command_preview=_preview(command),
+                error=str(exc),
+                exc_info=exc,
+            )
+            raise
 
 
 class DaytonaReadTool:
@@ -426,18 +478,54 @@ class DaytonaReadTool:
             )
         await ctx.ask(permission="read", patterns=[path], always=["*"], metadata={})
 
-        content = _fs_download(self._ctx.sandbox.fs, path)
-        lines = content.splitlines()
+        t0 = time.monotonic()
         offset = int(args.get("offset") or 0)
         limit = int(args.get("limit") or 2000)
-        chunk = lines[offset : offset + limit]
-        text = "\n".join(chunk)
-        t = truncate(text)
-        return ToolResult(
-            title=path,
-            output=t.content,
-            metadata={"truncated": t.truncated, "offset": offset, "limit": limit, "total_lines": len(lines)},
+        _log.info(
+            "daytona read started",
+            event="tool.daytona.read.start",
+            session_id=ctx.session_id,
+            sandbox_id=self._ctx.sandbox_id,
+            path=path,
+            offset=offset,
+            limit=limit,
         )
+        try:
+            content = _fs_download(self._ctx.sandbox.fs, path)
+            lines = content.splitlines()
+            chunk = lines[offset : offset + limit]
+            text = "\n".join(chunk)
+            t = truncate(text)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.info(
+                "daytona read completed",
+                event="tool.daytona.read.done",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                path=path,
+                total_lines=len(lines),
+                output_len=len(t.content),
+                truncated=t.truncated,
+            )
+            return ToolResult(
+                title=path,
+                output=t.content,
+                metadata={"truncated": t.truncated, "offset": offset, "limit": limit, "total_lines": len(lines)},
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.error(
+                "daytona read failed",
+                event="tool.daytona.read.error",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                path=path,
+                error=str(exc),
+                exc_info=exc,
+            )
+            raise
 
 
 class DaytonaWriteTool:
@@ -472,12 +560,45 @@ class DaytonaWriteTool:
                 metadata={},
             )
         await ctx.ask(permission="write", patterns=[path], always=["*"], metadata={})
-
-        parent = posixpath.dirname(path)
-        if parent and parent != "/":
-            _fs_mkdir(self._ctx.sandbox.fs, parent)
-        _fs_upload(self._ctx.sandbox.fs, path, content)
-        return ToolResult(title=path, output="Wrote file successfully.", metadata={"file_path": path})
+        t0 = time.monotonic()
+        _log.info(
+            "daytona write started",
+            event="tool.daytona.write.start",
+            session_id=ctx.session_id,
+            sandbox_id=self._ctx.sandbox_id,
+            path=path,
+            content_len=len(content),
+        )
+        try:
+            parent = posixpath.dirname(path)
+            if parent and parent != "/":
+                _fs_mkdir(self._ctx.sandbox.fs, parent)
+            _fs_upload(self._ctx.sandbox.fs, path, content)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.info(
+                "daytona write completed",
+                event="tool.daytona.write.done",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                path=path,
+                content_len=len(content),
+            )
+            return ToolResult(title=path, output="Wrote file successfully.", metadata={"file_path": path})
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.error(
+                "daytona write failed",
+                event="tool.daytona.write.error",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                path=path,
+                content_len=len(content),
+                error=str(exc),
+                exc_info=exc,
+            )
+            raise
 
 
 class DaytonaGlobTool:
@@ -517,36 +638,81 @@ class DaytonaGlobTool:
             metadata={"pattern": pattern, "path": args.get("path")},
         )
 
-        files: list[str]
-        if _check_rg(self._ctx, ctx):
-            rg_cmd = f"rg --files --hidden --no-messages --glob {shlex.quote(pattern)} {shlex.quote(search_root)}"
-            code, out, _ = _process_exec(self._ctx.sandbox, rg_cmd, cwd=self._ctx.cwd, timeout_ms=120_000)
-            if code not in (0, 1):
-                files = []
-            else:
-                files = [line.strip() for line in out.splitlines() if line.strip()]
-        else:
-            logger.warning(
-                "fall back to glob emulation without ripgrep",
-                event="daytona.glob.fallback_emulation",
+        t0 = time.monotonic()
+        _log.info(
+            "daytona glob started",
+            event="tool.daytona.glob.start",
+            session_id=ctx.session_id,
+            sandbox_id=self._ctx.sandbox_id,
+            search_root=search_root,
+            pattern=pattern,
+        )
+        try:
+            files: list[str] = []
+            fallback_mode = "search_files"
+            try:
+                files = _fs_search_files(self._ctx.sandbox.fs, search_root, pattern)
+            except Exception as exc:
+                fallback_mode = "emulation"
+                logger.warning(
+                    "daytona search_files unavailable for glob; falling back to emulation",
+                    event="daytona.glob.search_files_fallback",
+                    session_id=ctx.session_id,
+                    sandbox_id=self._ctx.sandbox_id,
+                    error=str(exc),
+                )
+                all_files = _walk_files(self._ctx.sandbox.fs, search_root)
+                files = [p for p in all_files if _match_glob(pattern, search_root, p)]
+
+            normalized: list[str] = []
+            for p in files:
+                raw = str(p).strip()
+                if not raw:
+                    continue
+                if raw.startswith("/"):
+                    normalized.append(posixpath.normpath(raw))
+                else:
+                    normalized.append(_resolve_remote_path(cwd=search_root, file_path=raw))
+
+            files = sorted(dict.fromkeys(normalized))
+            truncated = len(files) > _MAX_RESULTS
+            final_files = files[:_MAX_RESULTS]
+            output_lines: list[str] = final_files or ["No files found"]
+            if truncated:
+                output_lines += ["", "(Results are truncated. Consider using a more specific path or pattern.)"]
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.info(
+                "daytona glob completed",
+                event="tool.daytona.glob.done",
                 session_id=ctx.session_id,
                 sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                search_root=search_root,
+                pattern=pattern,
+                mode=fallback_mode,
+                total_matches=len(files),
+                returned=len(final_files),
+                truncated=truncated,
             )
-            all_files = _walk_files(self._ctx.sandbox.fs, search_root)
-            files = [p for p in all_files if _match_glob(pattern, search_root, p)]
-
-        files = sorted(dict.fromkeys(files))
-        truncated = len(files) > _MAX_RESULTS
-        final_files = files[:_MAX_RESULTS]
-        output_lines: list[str] = final_files or ["No files found"]
-        if truncated:
-            output_lines += ["", "(Results are truncated. Consider using a more specific path or pattern.)"]
-
-        return ToolResult(
-            title=search_root,
-            output="\n".join(output_lines),
-            metadata={"count": len(final_files), "truncated": truncated},
-        )
+            return ToolResult(
+                title=search_root,
+                output="\n".join(output_lines),
+                metadata={"count": len(final_files), "truncated": truncated},
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.error(
+                "daytona glob failed",
+                event="tool.daytona.glob.error",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                search_root=search_root,
+                pattern=pattern,
+                error=str(exc),
+                exc_info=exc,
+            )
+            raise
 
 
 class DaytonaGrepTool:
@@ -591,60 +757,137 @@ class DaytonaGrepTool:
             metadata={"pattern": pattern, "path": args.get("path"), "include": include},
         )
 
-        matches: list[tuple[str, int, str]] = []
-        if _check_rg(self._ctx, ctx):
-            cmd = f"rg -n --hidden --no-messages {shlex.quote(pattern)} {shlex.quote(search_root)}"
-            if include:
-                cmd = f"{cmd} --glob {shlex.quote(include)}"
-            code, out, _ = _process_exec(self._ctx.sandbox, cmd, cwd=self._ctx.cwd, timeout_ms=120_000)
-            if code in (0, 1):
-                for line in out.splitlines():
-                    parts = line.split(":", 2)
-                    if len(parts) != 3:
-                        continue
-                    fp, ln, text = parts
-                    try:
-                        line_no = int(ln)
-                    except Exception:
-                        continue
-                    matches.append((fp, line_no, text))
-        else:
-            regex = re.compile(pattern)
-            files = _walk_files(self._ctx.sandbox.fs, search_root)
-            for fp in files:
-                rel = str(PurePosixPath(fp).relative_to(PurePosixPath(search_root))) if fp.startswith(search_root) else fp
-                rel = rel.lstrip("/")
-                if include and not (fnmatch(rel, include) or fnmatch(posixpath.basename(rel), include)):
-                    continue
-                try:
-                    content = _fs_download(self._ctx.sandbox.fs, fp)
-                except Exception:
-                    continue
-                for idx, line in enumerate(content.splitlines(), start=1):
-                    if regex.search(line):
-                        matches.append((fp, idx, line))
-
-        if not matches:
-            return ToolResult(title=pattern, output="No files found", metadata={"matches": 0, "truncated": False})
-
-        truncated = len(matches) > _MAX_RESULTS
-        final = matches[:_MAX_RESULTS]
-        output_lines: list[str] = [f"Found {len(final)} matches"]
-        current_file = ""
-        for fp, line_no, text in final:
-            if current_file != fp:
-                if current_file:
-                    output_lines.append("")
-                current_file = fp
-                output_lines.append(f"{fp}:")
-            line_text = text if len(text) <= _MAX_LINE_LENGTH else text[:_MAX_LINE_LENGTH] + "..."
-            output_lines.append(f"  Line {line_no}: {line_text}")
-        if truncated:
-            output_lines += ["", "(Results are truncated. Consider using a more specific path or pattern.)"]
-
-        t = truncate("\n".join(output_lines))
-        return ToolResult(
-            title=pattern,
-            output=t.content,
-            metadata={"matches": len(final), "truncated": truncated or t.truncated},
+        t0 = time.monotonic()
+        _log.info(
+            "daytona grep started",
+            event="tool.daytona.grep.start",
+            session_id=ctx.session_id,
+            sandbox_id=self._ctx.sandbox_id,
+            search_root=search_root,
+            pattern=pattern,
+            include=include,
         )
+        try:
+            matches: list[tuple[str, int, str]] = []
+            mode = "find_files"
+            try:
+                matches = _fs_find_files(self._ctx.sandbox.fs, search_root, pattern)
+            except Exception as exc:
+                mode = "fallback"
+                logger.warning(
+                    "daytona find_files unavailable for grep; falling back to rg/emulation",
+                    event="daytona.grep.find_files_fallback",
+                    session_id=ctx.session_id,
+                    sandbox_id=self._ctx.sandbox_id,
+                    error=str(exc),
+                )
+                if _check_rg(self._ctx, ctx):
+                    mode = "rg"
+                    cmd = f"rg -n --hidden --no-messages {shlex.quote(pattern)} {shlex.quote(search_root)}"
+                    if include:
+                        cmd = f"{cmd} --glob {shlex.quote(include)}"
+                    code, out, _ = _process_exec(self._ctx.sandbox, cmd, cwd=self._ctx.cwd, timeout_ms=120_000)
+                    if code in (0, 1):
+                        for line in out.splitlines():
+                            parts = line.split(":", 2)
+                            if len(parts) != 3:
+                                continue
+                            fp, ln, text = parts
+                            try:
+                                line_no = int(ln)
+                            except Exception:
+                                continue
+                            matches.append((fp, line_no, text))
+                else:
+                    mode = "emulation"
+                    regex = re.compile(pattern)
+                    files = _walk_files(self._ctx.sandbox.fs, search_root)
+                    for fp in files:
+                        rel = str(PurePosixPath(fp).relative_to(PurePosixPath(search_root))) if fp.startswith(search_root) else fp
+                        rel = rel.lstrip("/")
+                        if include and not (fnmatch(rel, include) or fnmatch(posixpath.basename(rel), include)):
+                            continue
+                        try:
+                            content = _fs_download(self._ctx.sandbox.fs, fp)
+                        except Exception:
+                            continue
+                        for idx, line in enumerate(content.splitlines(), start=1):
+                            if regex.search(line):
+                                matches.append((fp, idx, line))
+
+            if include:
+                filtered: list[tuple[str, int, str]] = []
+                for fp, line_no, text in matches:
+                    rel = str(PurePosixPath(fp).relative_to(PurePosixPath(search_root))) if fp.startswith(search_root) else fp
+                    rel = rel.lstrip("/")
+                    if fnmatch(rel, include) or fnmatch(posixpath.basename(rel), include):
+                        filtered.append((fp, line_no, text))
+                matches = filtered
+
+            if not matches:
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                _log.info(
+                    "daytona grep completed with no matches",
+                    event="tool.daytona.grep.done",
+                    session_id=ctx.session_id,
+                    sandbox_id=self._ctx.sandbox_id,
+                    duration_ms=duration_ms,
+                    search_root=search_root,
+                    pattern=pattern,
+                    include=include,
+                    mode=mode,
+                    matches=0,
+                    truncated=False,
+                )
+                return ToolResult(title=pattern, output="No files found", metadata={"matches": 0, "truncated": False})
+
+            truncated = len(matches) > _MAX_RESULTS
+            final = matches[:_MAX_RESULTS]
+            output_lines: list[str] = [f"Found {len(final)} matches"]
+            current_file = ""
+            for fp, line_no, text in final:
+                if current_file != fp:
+                    if current_file:
+                        output_lines.append("")
+                    current_file = fp
+                    output_lines.append(f"{fp}:")
+                line_text = text if len(text) <= _MAX_LINE_LENGTH else text[:_MAX_LINE_LENGTH] + "..."
+                output_lines.append(f"  Line {line_no}: {line_text}")
+            if truncated:
+                output_lines += ["", "(Results are truncated. Consider using a more specific path or pattern.)"]
+
+            t = truncate("\n".join(output_lines))
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.info(
+                "daytona grep completed",
+                event="tool.daytona.grep.done",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                search_root=search_root,
+                pattern=pattern,
+                include=include,
+                mode=mode,
+                matches=len(final),
+                truncated=truncated or t.truncated,
+            )
+            return ToolResult(
+                title=pattern,
+                output=t.content,
+                metadata={"matches": len(final), "truncated": truncated or t.truncated},
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            _log.error(
+                "daytona grep failed",
+                event="tool.daytona.grep.error",
+                session_id=ctx.session_id,
+                sandbox_id=self._ctx.sandbox_id,
+                duration_ms=duration_ms,
+                search_root=search_root,
+                pattern=pattern,
+                include=include,
+                error=str(exc),
+                exc_info=exc,
+            )
+            raise

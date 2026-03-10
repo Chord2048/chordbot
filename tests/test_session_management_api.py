@@ -100,7 +100,12 @@ class SessionManagementApiTests(unittest.TestCase):
 
         async def _ensure(session):
             return session.model_copy(
-                update={"runtime": SessionRuntime(backend="daytona", daytona=DaytonaRuntimeConfig(sandbox_id="sbx-test"))},
+                update={
+                    "runtime": SessionRuntime(
+                        backend="daytona",
+                        daytona=DaytonaRuntimeConfig(sandbox_id="sbx-test", sandbox_name="demo-sandbox"),
+                    )
+                },
             )
 
         with patch("chordcode.api.app.daytona_manager.ensure_session_runtime_async", new=AsyncMock(side_effect=_ensure)) as mocked:
@@ -116,7 +121,38 @@ class SessionManagementApiTests(unittest.TestCase):
             data = res.json()
             self.assertEqual(data["runtime"]["backend"], "daytona")
             self.assertEqual(data["runtime"]["daytona"]["sandbox_id"], "sbx-test")
+            self.assertEqual(data["runtime"]["daytona"]["sandbox_name"], "demo-sandbox")
             self.assertEqual(mocked.await_count, 1)
+
+    def test_create_daytona_session_uses_remote_default_workspace_when_local_default_passed(self) -> None:
+        from chordcode.model import SessionRuntime, DaytonaRuntimeConfig
+
+        async def _ensure(session):
+            # Ensure API normalized worktree before runtime init.
+            self.assertEqual(session.worktree, "/workspace")
+            self.assertEqual(session.cwd, "/workspace")
+            return session.model_copy(
+                update={
+                    "runtime": SessionRuntime(
+                        backend="daytona",
+                        daytona=DaytonaRuntimeConfig(sandbox_id="sbx-remote", sandbox_name="remote-name"),
+                    ),
+                },
+            )
+
+        with patch("chordcode.api.app.daytona_manager.ensure_session_runtime_async", new=AsyncMock(side_effect=_ensure)):
+            res = self.client.post(
+                "/sessions",
+                json={
+                    "worktree": self.worktree,
+                    "title": "Daytona Session",
+                    "runtime": {"backend": "daytona"},
+                },
+            )
+            self.assertEqual(res.status_code, 200, res.text)
+            data = res.json()
+            self.assertEqual(data["worktree"], "/workspace")
+            self.assertEqual(data["cwd"], "/workspace")
 
     def test_create_daytona_session_rolls_back_when_runtime_init_fails(self) -> None:
         from chordcode.runtime import DaytonaOperationError

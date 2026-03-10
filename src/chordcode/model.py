@@ -82,6 +82,7 @@ class PermissionRule(BaseModel):
 
 class DaytonaRuntimeConfig(BaseModel):
     sandbox_id: str | None = None
+    sandbox_name: str | None = None
 
 
 class SessionRuntime(BaseModel):

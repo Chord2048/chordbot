@@ -72,6 +72,7 @@
 .session-info {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 6px 12px;
   background: var(--panel);
@@ -85,6 +86,15 @@
 .session-info .title {
   color: var(--text);
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-runtime-meta {
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
