@@ -26,6 +26,7 @@ from chordcode.llm.openai_chat import OpenAIChatProvider
 from chordcode.loop.interrupt import InterruptManager
 from chordcode.loop.session_loop import SessionLoop
 from chordcode.log import init_logging, logger
+from chordcode.memory import MemoryService, create_memory_hooks
 from chordcode.model import (
     AddMessageRequest, CreateCronJobRequest, CronJob, CronJobEnabledRequest, CronJobRunRequest, CreateSessionRequest, Message, ModelRef,
     PermissionReply, PermissionRule, RenameSessionRequest, Session, SessionRuntime, DaytonaRuntimeConfig, TextPart,
@@ -44,6 +45,7 @@ from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
 from chordcode.tools.web import TavilySearchTool, WebFetchTool, WebSearchCtx
 from chordcode.tools.kb_search import KBSearchCtx, KBSearchTool
+from chordcode.tools.memory import MemoryGetTool, MemorySearchTool, MemoryToolCtx
 from chordcode.mcp import MCPManager, MCPToolAdapter, load_mcp_configs, MCPServerConfig
 from chordcode.skills.loader import SkillLoader
 
@@ -75,6 +77,8 @@ if langfuse_hook:
 perm = PermissionService(bus, store, hooks)
 mcp_manager = MCPManager(bus=bus)
 daytona_manager = DaytonaManager(cfg.daytona, store)
+memory_service = MemoryService(cfg=cfg, store=store)
+hooks.add(create_memory_hooks(cfg=cfg, store=store, service=memory_service))
 
 # Initialize KB backend (optional — disabled when base_url is empty)
 kb_client = None
@@ -256,6 +260,12 @@ async def _build_tools(session: Session) -> ToolRegistry:
     if kb_client is not None:
         builtin_tools.append(KBSearchTool(KBSearchCtx(kb=kb_client)))
 
+    if session.runtime.backend == "local" and memory_service.enabled:
+        manager = await memory_service.get_manager(session.worktree)
+        if manager is not None:
+            memory_ctx = MemoryToolCtx(manager=manager)
+            builtin_tools.extend([MemorySearchTool(memory_ctx), MemoryGetTool(memory_ctx)])
+
     mcp_tool_infos = await mcp_manager.list_tools()
     mcp_tools = [MCPToolAdapter(info, mcp_manager) for info in mcp_tool_infos]
     return ToolRegistry(builtin_tools + mcp_tools)
@@ -337,6 +347,7 @@ async def _resolve_or_create_channel_session(msg: InboundChannelMessage) -> Sess
         runtime=SessionRuntime(backend="local"),
     )
     await store.create_session(s)
+    await memory_service.ensure_worktree(s.worktree)
     await store.bind_channel_session(
         channel=msg.channel,
         chat_id=msg.chat_id,
@@ -457,6 +468,7 @@ app.mount("/static", StaticFiles(directory=str(_web_dir)), name="static")
 async def _startup():
     global channel_bridge, cron_service
     await store.init()
+    await memory_service.start()
     await hooks.trigger(Hook.Config, {"config": cfg}, {})
 
     # Initialize MCP servers
@@ -486,6 +498,7 @@ async def _shutdown():
     if cron_service:
         await cron_service.stop()
         cron_service = None
+    await memory_service.stop()
     if channel_bridge:
         await channel_bridge.stop()
     await channel_manager.stop_all()
@@ -789,6 +802,8 @@ async def create_session(body: CreateSessionRequest):
         runtime=runtime,
     )
     await store.create_session(s)
+    if runtime_backend == "local":
+        await memory_service.ensure_worktree(s.worktree)
     if runtime_backend == "daytona":
         try:
             s = await daytona_manager.ensure_session_runtime_async(s)

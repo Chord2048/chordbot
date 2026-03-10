@@ -74,6 +74,14 @@ hooks:
 web_search:
   tavily_api_key: ""
 
+# --- Local Memory ---
+memory:
+  enabled: true
+  embedding_base_url: ""
+  embedding_api_key: ""
+  embedding_model: ""
+  sync_interval_seconds: 3
+
 # --- Daytona Runtime (optional) ---
 daytona:
   api_key: ""

@@ -96,6 +96,15 @@ class WebSearchConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    enabled: bool = True
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+    sync_interval_seconds: int = 3
+
+
+@dataclass(frozen=True)
 class DaytonaConfig:
     api_key: str = ""
     server_url: str = ""
@@ -118,6 +127,7 @@ class Config:
     default_worktree: str
     default_permission_action: Literal["allow", "deny", "ask"]
     prompt_templates: dict[str, str]
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     daytona: DaytonaConfig = field(default_factory=DaytonaConfig)
 
 
@@ -307,6 +317,7 @@ def _build_config(merged: dict[str, Any]) -> Config:
     vlm = g.get("vlm", {}) or {}
     hooks = g.get("hooks", {}) or {}
     ws = g.get("web_search", {}) or {}
+    memory = g.get("memory", {}) or {}
     daytona = g.get("daytona", {}) or {}
     pt = g.get("prompt_templates", {}) or {}
     if not isinstance(pt, dict):
@@ -362,6 +373,13 @@ def _build_config(merged: dict[str, Any]) -> Config:
         hooks=HooksConfig(debug=_coerce_bool(hooks.get("debug", False), False)),
         web_search=WebSearchConfig(
             tavily_api_key=str(ws.get("tavily_api_key", "") or "").strip(),
+        ),
+        memory=MemoryConfig(
+            enabled=_coerce_bool(memory.get("enabled", True), True),
+            embedding_base_url=str(memory.get("embedding_base_url", "") or "").strip(),
+            embedding_api_key=str(memory.get("embedding_api_key", "") or "").strip(),
+            embedding_model=str(memory.get("embedding_model", "") or "").strip(),
+            sync_interval_seconds=max(1, int(memory.get("sync_interval_seconds", 3) or 3)),
         ),
         system_prompt=system_prompt,
         db_path=db_path,

@@ -101,6 +101,13 @@ _r("hooks.debug", "Enable hook debug logging", False)
 # --- Web Search ---
 _r("web_search.tavily_api_key", "Tavily API key for web search", "", sensitive=True)
 
+# --- Memory ---
+_r("memory.enabled", "Enable local memory indexing and retrieval", True)
+_r("memory.embedding_base_url", "OpenAI-compatible embeddings base URL", "")
+_r("memory.embedding_api_key", "API key for memory embeddings", "", sensitive=True)
+_r("memory.embedding_model", "Embedding model identifier for memory search", "")
+_r("memory.sync_interval_seconds", "Background memory sync interval in seconds", 3)
+
 # --- Daytona Runtime ---
 _r("daytona.api_key", "Daytona API key", "", sensitive=True)
 _r("daytona.server_url", "Daytona server URL", "")

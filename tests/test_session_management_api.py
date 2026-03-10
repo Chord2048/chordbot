@@ -185,6 +185,8 @@ class SessionManagementApiTests(unittest.TestCase):
         session_obj = asyncio.run(app_module.store.get_session(session["id"]))
         tools_local = asyncio.run(app_module._build_tools(session_obj))
         self.assertIsInstance(tools_local.get("bash"), BashTool)
+        self.assertEqual(tools_local.get("memory_search").name, "memory_search")
+        self.assertEqual(tools_local.get("memory_get").name, "memory_get")
 
         session_daytona = session_obj.model_copy(
             update={"runtime": SessionRuntime(backend="daytona", daytona=DaytonaRuntimeConfig(sandbox_id="sbx-1"))},
@@ -196,6 +198,8 @@ class SessionManagementApiTests(unittest.TestCase):
         ):
             tools_daytona = asyncio.run(app_module._build_tools(session_daytona))
             self.assertIsInstance(tools_daytona.get("bash"), DaytonaBashTool)
+            with self.assertRaises(KeyError):
+                tools_daytona.get("memory_search")
 
     def test_rename_session(self) -> None:
         session = self._create_session("Before Rename")

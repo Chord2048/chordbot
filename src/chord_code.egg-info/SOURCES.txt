@@ -58,6 +58,14 @@ src/chordcode/mcp/__init__.py
 src/chordcode/mcp/client.py
 src/chordcode/mcp/config.py
 src/chordcode/mcp/tool_adapter.py
+src/chordcode/memory/__init__.py
+src/chordcode/memory/chunking.py
+src/chordcode/memory/embeddings.py
+src/chordcode/memory/hooks.py
+src/chordcode/memory/manager.py
+src/chordcode/memory/service.py
+src/chordcode/memory/store.py
+src/chordcode/memory/types.py
 src/chordcode/observability/__init__.py
 src/chordcode/observability/langfuse_client.py
 src/chordcode/observability/langfuse_hook.py
@@ -80,6 +88,7 @@ src/chordcode/tools/daytona.py
 src/chordcode/tools/files.py
 src/chordcode/tools/grep.py
 src/chordcode/tools/kb_search.py
+src/chordcode/tools/memory.py
 src/chordcode/tools/paths.py
 src/chordcode/tools/registry.py
 src/chordcode/tools/skill.py

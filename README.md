@@ -92,6 +92,25 @@ chordcode cronjobs list
 chordcode cronjobs runs <job-id>
 ```
 
+## Local Memory
+Chord Code now supports OpenClaw-style local memory for local sessions.
+
+- Put long-term memory in `memory.md`
+- Put dated memory archives in `memory/YYYY-MM-DD.md`
+- The agent loads `memory.md` into prompt context for local sessions
+- The agent can use `memory_search` and `memory_get` tools to query memory
+- Detailed design and implementation notes: [docs/memory.md](docs/memory.md)
+
+Example config:
+```yaml
+memory:
+  enabled: true
+  embedding_base_url: "https://api.openai.com/v1"
+  embedding_api_key: "REPLACE_ME"
+  embedding_model: "text-embedding-3-small"
+  sync_interval_seconds: 3
+```
+
 ## Tests
 Run with pytest (recommended):
 ```bash
@@ -134,6 +153,7 @@ Note: Uvicorn access logs are not included in the JSONL log file. If you want to
 ## Docs
 - `chord-code/docs/project.md`
 - `chord-code/docs/cronjobs.md`
+- `chord-code/docs/memory.md`
 
 ## Notes
 - Do not commit `.env` (contains secrets).
