@@ -266,6 +266,20 @@ class MemoryIndexStore:
             row = await cur.fetchone()
         return str(row[0]) if row else None
 
+    async def stats(self) -> dict[str, int]:
+        async with aiosqlite.connect(self._db_path) as db:
+            cur_files = await db.execute("SELECT COUNT(*) FROM files")
+            file_row = await cur_files.fetchone()
+            cur_archives = await db.execute("SELECT COUNT(*) FROM files WHERE path LIKE 'memory/%'")
+            archive_row = await cur_archives.fetchone()
+            cur_chunks = await db.execute("SELECT COUNT(*) FROM chunks")
+            chunk_row = await cur_chunks.fetchone()
+        return {
+            "indexed_file_count": int(file_row[0] or 0),
+            "indexed_archive_file_count": int(archive_row[0] or 0),
+            "indexed_chunk_count": int(chunk_row[0] or 0),
+        }
+
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
@@ -287,4 +301,3 @@ def _build_fts_query(raw: str) -> str | None:
 
 def _truncate(text: str, limit: int = 700) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
-

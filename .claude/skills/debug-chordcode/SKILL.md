@@ -45,7 +45,7 @@ chordcode sessions delete "$SESSION"
 ```bash
 chordcode run "Reply with exactly: PONG" --permission allow --json
 ```
-
+ 
 ## MCP / Skills / KB Status
 
 ```bash

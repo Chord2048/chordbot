@@ -47,11 +47,10 @@ def create_memory_hooks(*, cfg: Config, store: SQLiteStore, service: MemoryServi
                     "## Memory Recall",
                     "Before answering questions about prior work, decisions, preferences, or todos, use memory_search on local memory.",
                     "Use memory_get only after memory_search when you need exact lines or larger raw context.",
-                    "When you need to update long-term memory, rewrite memory.md or a memory/YYYY-MM-DD.md archive using the existing read and write tools.",
-                    "Put stable evergreen facts in memory.md, and dated session conclusions in memory/YYYY-MM-DD.md.",
+                    "When you need to update long-term memory, rewrite memory.md or append dated notes to memory/YYYY-MM-DD.md using the existing read and write tools.",
+                    "Put stable evergreen facts in memory.md, and append dated session conclusions to memory/YYYY-MM-DD.md.",
                 ]
             )
         )
 
     return {Hook.ExperimentalChatSystemTransform: on_system_transform}
-

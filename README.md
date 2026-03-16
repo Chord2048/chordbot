@@ -97,6 +97,7 @@ Chord Code now supports OpenClaw-style local memory for local sessions.
 
 - Put long-term memory in `memory.md`
 - Put dated memory archives in `memory/YYYY-MM-DD.md`
+- Creating a new local session archives the previous local session into the current day's `memory/YYYY-MM-DD.md`
 - The agent loads `memory.md` into prompt context for local sessions
 - The agent can use `memory_search` and `memory_get` tools to query memory
 - Detailed design and implementation notes: [docs/memory.md](docs/memory.md)

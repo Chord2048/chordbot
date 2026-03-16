@@ -4,6 +4,7 @@ import asyncio
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -92,6 +93,87 @@ def make_config(*, db_path: str, worktree: str, sync_interval_seconds: int = 3) 
 
 
 class MemoryManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_archives_previous_session_into_daily_memory_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worktree"
+            worktree.mkdir()
+
+            db_path = str(root / "app.sqlite3")
+            cfg = make_config(db_path=db_path, worktree=str(worktree), sync_interval_seconds=3600)
+            store = SQLiteStore(db_path)
+            await store.init()
+
+            previous = Session(
+                id="s1",
+                title="Previous Session",
+                worktree=str(worktree),
+                cwd=str(worktree),
+                created_at=1,
+                updated_at=2,
+                permission_rules=[PermissionRule(permission="*", pattern="*", action="allow")],
+                runtime=SessionRuntime(backend="local"),
+            )
+            current = Session(
+                id="s2",
+                title="Current Session",
+                worktree=str(worktree),
+                cwd=str(worktree),
+                created_at=3,
+                updated_at=3,
+                permission_rules=[PermissionRule(permission="*", pattern="*", action="allow")],
+                runtime=SessionRuntime(backend="local"),
+            )
+            await store.create_session(previous)
+            await store.create_session(current)
+
+            from chordcode.model import Message, ModelRef, TextPart
+
+            user_msg = Message(
+                id="m1",
+                session_id=previous.id,
+                role="user",
+                agent="primary",
+                model=ModelRef(provider="openai-compatible", id="m"),
+                created_at=10,
+            )
+            assistant_msg = Message(
+                id="m2",
+                session_id=previous.id,
+                role="assistant",
+                agent="primary",
+                model=ModelRef(provider="openai-compatible", id="m"),
+                created_at=20,
+            )
+            await store.add_message(user_msg)
+            await store.add_part(
+                previous.id,
+                user_msg.id,
+                TextPart(id="p1", message_id=user_msg.id, session_id=previous.id, text="Discuss alpha launch plan"),
+            )
+            await store.add_message(assistant_msg)
+            await store.add_part(
+                previous.id,
+                assistant_msg.id,
+                TextPart(id="p2", message_id=assistant_msg.id, session_id=previous.id, text="Captured release milestones"),
+            )
+
+            service = MemoryService(cfg=cfg, store=store, embedding_provider_factory=lambda _cfg: None)
+            archive_rel_path = await service.archive_previous_session_for_new_session(current)
+            self.assertIsNotNone(archive_rel_path)
+
+            archive_file = worktree / str(archive_rel_path)
+            self.assertTrue(archive_file.is_file())
+            content = archive_file.read_text(encoding="utf-8")
+            self.assertIn("Previous Session", content)
+            self.assertIn("Discuss alpha launch plan", content)
+            self.assertIn("Captured release milestones", content)
+
+            manager = await service.get_manager(str(worktree))
+            assert manager is not None
+            result = await manager.search(query="alpha launch", max_results=3, min_score=0.01)
+            self.assertTrue(any(hit["path"] == archive_rel_path for hit in result["hits"]))
+
     async def test_search_detects_stale_files_before_interval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             worktree = Path(tmp)

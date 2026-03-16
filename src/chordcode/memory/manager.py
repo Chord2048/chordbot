@@ -40,6 +40,12 @@ class MemoryManager:
         meta = await self._db.read_meta("index_state")
         if meta and isinstance(meta.get("last_sync_ms"), int):
             self._last_sync_ms = int(meta["last_sync_ms"])
+        _log.info(
+            "Memory manager ready",
+            event="memory.manager.ready",
+            worktree=self.worktree,
+            db_path=self._db.path,
+        )
 
     async def sync_if_stale(self) -> None:
         if not await self._is_index_stale():
@@ -52,8 +58,30 @@ class MemoryManager:
             indexed = await self._db.list_files()
             current_paths = set(files.keys())
             indexed_paths = set(indexed.keys())
-
+            added = sorted(current_paths - indexed_paths)
             removed = sorted(indexed_paths - current_paths)
+            changed = sorted(
+                path
+                for path, record in files.items()
+                if path in indexed
+                and (
+                    indexed[path].hash != record.hash
+                    or indexed[path].size != record.size
+                    or indexed[path].mtime_ms != record.mtime_ms
+                )
+            )
+
+            if added or changed or removed:
+                _log.info(
+                    "Memory file changes detected",
+                    event="memory.sync.change_detected",
+                    worktree=self.worktree,
+                    added_paths=added,
+                    changed_paths=changed,
+                    removed_paths=removed,
+                    source_file_count=len(files),
+                )
+
             if removed:
                 await self._db.delete_paths(removed)
 
@@ -71,6 +99,17 @@ class MemoryManager:
                     "worktree": self.worktree,
                     "db_path": self._db.path,
                 },
+            )
+            stats = await self.describe_sources()
+            _log.info(
+                "Memory sync completed",
+                event="memory.sync.completed",
+                worktree=self.worktree,
+                source_file_count=stats["source_file_count"],
+                archive_file_count=stats["archive_file_count"],
+                indexed_file_count=stats["indexed_file_count"],
+                indexed_chunk_count=stats["indexed_chunk_count"],
+                watched_paths=stats["watched_paths"],
             )
 
     async def search(
@@ -147,6 +186,14 @@ class MemoryManager:
         }
         if warning:
             payload["warning"] = warning
+        _log.debug(
+            "Memory search completed",
+            event="memory.search.completed",
+            worktree=self.worktree,
+            query=query_text,
+            hit_count=len(payload["hits"]),
+            search_mode=payload["stats"]["search_mode"],
+        )
         return payload
 
     async def read_file(
@@ -180,6 +227,20 @@ class MemoryManager:
             "from_line": start,
             "to_line": end,
             "text": "\n".join(sliced),
+        }
+
+    async def describe_sources(self) -> dict[str, object]:
+        files = await self._scan_files()
+        archive_paths = sorted(path for path in files if path.startswith("memory/"))
+        db_stats = await self._db.stats()
+        return {
+            "memory_dir": str(Path(self.worktree, "memory")),
+            "has_memory_md": "memory.md" in files,
+            "source_file_count": len(files),
+            "archive_file_count": len(archive_paths),
+            "archive_paths": archive_paths,
+            "watched_paths": sorted(files.keys()),
+            **db_stats,
         }
 
     def index_age_ms(self) -> int | None:
@@ -262,8 +323,15 @@ class MemoryManager:
     async def _is_index_stale(self) -> bool:
         now = int(time.time() * 1000)
         if self._last_sync_ms <= 0:
+            _log.debug("Memory index stale: never synced", event="memory.sync.stale_detected", worktree=self.worktree, reason="never_synced")
             return True
         if now - self._last_sync_ms >= max(int(self._config.sync_interval_seconds), 1) * 1000:
+            _log.debug(
+                "Memory index stale: sync interval exceeded",
+                event="memory.sync.stale_detected",
+                worktree=self.worktree,
+                reason="interval",
+            )
             return True
 
         indexed = await self._db.list_files()
@@ -271,13 +339,33 @@ class MemoryManager:
         candidates = self._memory_candidates(worktree)
         candidate_paths = {path.relative_to(worktree).as_posix(): path for path in candidates}
         if set(indexed.keys()) != set(candidate_paths.keys()):
+            _log.debug(
+                "Memory index stale: file set changed",
+                event="memory.sync.stale_detected",
+                worktree=self.worktree,
+                reason="file_set_changed",
+            )
             return True
         for rel_path, path in candidate_paths.items():
             stat = path.stat()
             indexed_record = indexed.get(rel_path)
             if indexed_record is None:
+                _log.debug(
+                    "Memory index stale: missing indexed record",
+                    event="memory.sync.stale_detected",
+                    worktree=self.worktree,
+                    reason="missing_indexed_record",
+                    path=rel_path,
+                )
                 return True
             if indexed_record.size != stat.st_size or indexed_record.mtime_ms != int(stat.st_mtime * 1000):
+                _log.debug(
+                    "Memory index stale: file changed",
+                    event="memory.sync.stale_detected",
+                    worktree=self.worktree,
+                    reason="file_changed",
+                    path=rel_path,
+                )
                 return True
         return False
 

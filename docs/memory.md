@@ -14,7 +14,8 @@ Chord Code 支持面向本地 session 的工作区记忆机制，设计目标参
   - 当前工作区的长期记忆
   - 会被注入到 agent 的系统上下文
 - `memory/YYYY-MM-DD.md`
-  - 按日期归档的会话结论、阶段性决策和记录
+  - 按日期归档的会话日志和阶段性结论
+  - 当前实现会在创建新的本地 session 时，将同一 worktree 下最近一个本地 session 的对话内容追加写入当天文件
 - 参与索引的文件范围为：
   - `memory.md`
   - `memory/**/*.md`
@@ -40,6 +41,7 @@ Chord Code 支持面向本地 session 的工作区记忆机制，设计目标参
 - `manager.py` / `service.py`
   - `MemoryManager` 负责单个 worktree 的扫描、增量同步和混合搜索
   - `MemoryService` 负责应用级后台轮询和 manager 生命周期
+  - `archive.py` 负责把 session 历史渲染为追加式 Markdown 归档
 
 ## Storage Layout
 
@@ -58,6 +60,13 @@ Chord Code 支持面向本地 session 的工作区记忆机制，设计目标参
 - `cfg.default_worktree`
 - 已存在的本地 session worktree
 - 新建本地 session 的 worktree
+
+此外，创建新的本地 session 时会触发一次自动归档：
+
+- 选择同一 `worktree` 下最近一个已有本地 session
+- 提取其中的 user / assistant 文本内容
+- 追加写入当天的 `memory/YYYY-MM-DD.md`
+- 写入完成后立即触发一次同步，使新归档可被后续 `memory_search` 检索
 
 同步机制特点：
 
@@ -106,8 +115,34 @@ memory:
 - 涉及过往工作、偏好、决策、待办时先使用 `memory_search`
 - 需要精确引用原文时再使用 `memory_get`
 - 稳定、长期有效的信息写回 `memory.md`
-- 带日期的阶段性结论写入 `memory/YYYY-MM-DD.md`
+- 带日期的阶段性结论追加到 `memory/YYYY-MM-DD.md`
 - 写入使用现有文件读写工具完成，不额外引入 `memory_write`
+
+## Logging
+
+memory 模块补充了较完整的日志，便于观察索引与归档行为。
+
+启动或接管 worktree 时会记录：
+
+- 正在监控的 `memory` 目录
+- 当前发现的 `memory.md` / `memory/**/*.md` 文件数量
+- 当前归档文件数量
+- 当前 SQLite 索引文件路径
+- 已索引文件数和 chunk 数
+
+同步过程中会记录：
+
+- 是否检测到文件集合变化
+- 哪些文件是新增、修改、删除
+- 每次同步完成后的源文件统计与索引统计
+
+自动归档时会记录：
+
+- 触发归档的新 session
+- 被归档的旧 session
+- 目标归档文件路径
+- 本次归档包含的消息条数
+- 归档完成后索引中的文件数和 chunk 数
 
 ## Tools
 

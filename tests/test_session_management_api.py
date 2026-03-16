@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
@@ -220,6 +221,35 @@ class SessionManagementApiTests(unittest.TestCase):
         listed_sessions = listed.json()["sessions"]
         self.assertEqual(len(listed_sessions), 1)
         self.assertEqual(listed_sessions[0]["title"], "After Rename")
+
+    def test_create_session_archives_previous_session_into_daily_memory_log(self) -> None:
+        worktree = Path(self.worktree) / "archive-worktree"
+        worktree.mkdir(exist_ok=True)
+
+        first = self.client.post(
+            "/sessions",
+            json={"worktree": str(worktree), "title": "First Session"},
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        first_session = first.json()
+
+        add_msg_res = self.client.post(
+            f"/sessions/{first_session['id']}/messages",
+            json={"text": "Need to remember the beta rollout plan"},
+        )
+        self.assertEqual(add_msg_res.status_code, 200, add_msg_res.text)
+
+        second = self.client.post(
+            "/sessions",
+            json={"worktree": str(worktree), "title": "Second Session"},
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+
+        archive_path = worktree / "memory" / f"{datetime.now().astimezone().strftime('%Y-%m-%d')}.md"
+        self.assertTrue(archive_path.is_file())
+        content = archive_path.read_text(encoding="utf-8")
+        self.assertIn("First Session", content)
+        self.assertIn("Need to remember the beta rollout plan", content)
 
     def test_rename_session_requires_non_empty_title(self) -> None:
         session = self._create_session("Keep Name")

@@ -803,6 +803,16 @@ async def create_session(body: CreateSessionRequest):
     )
     await store.create_session(s)
     if runtime_backend == "local":
+        try:
+            await memory_service.archive_previous_session_for_new_session(s)
+        except Exception as exc:
+            logger.warning(
+                "Automatic memory archive failed during session creation",
+                event="memory.archive.error",
+                session_id=s.id,
+                worktree=s.worktree,
+                error=str(exc),
+            )
         await memory_service.ensure_worktree(s.worktree)
     if runtime_backend == "daytona":
         try:
