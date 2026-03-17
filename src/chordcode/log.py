@@ -17,6 +17,8 @@ _HANDLER_IDS: list[int] = []
 _CONTEXT_KEYS: tuple[str, ...] = (
     "event",
     "session_id",
+    "root_session_id",
+    "parent_session_id",
     "message_id",
     "agent",
     "trace_id",

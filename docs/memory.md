@@ -66,7 +66,7 @@ Chord Code 支持面向本地 session 的工作区记忆机制，设计目标参
 - 选择同一 `worktree` 下最近一个已有本地 session
 - 提取其中的 user / assistant 文本内容
 - 追加写入当天的 `memory/YYYY-MM-DD.md`
-- 写入完成后立即触发一次同步，使新归档可被后续 `memory_search` 检索
+- 写入完成后调度一次后台同步，避免创建 session 时被索引/embedding 阻塞
 
 同步机制特点：
 
@@ -74,7 +74,7 @@ Chord Code 支持面向本地 session 的工作区记忆机制，设计目标参
 - 基于文件内容 hash 判断新增、修改、删除
 - 对变更文件做增量重建
 - 基于 chunk hash 复用未变化 chunk 的 embeddings
-- `memory_search` 在查询前会执行一次轻量 stale-check，尽量避免查到过期索引
+- `memory_search` 在查询前会执行一次轻量 stale-check；如果发现索引过期，则只调度后台刷新，不阻塞当前查询
 
 同步频率由以下配置控制：
 

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 
 Role = Literal["user", "assistant", "tool"]
+SessionKind = Literal["primary", "subagent"]
 
 # Todo types
 TodoStatus = Literal["pending", "in_progress", "completed", "cancelled"]
@@ -99,6 +100,11 @@ class Session(BaseModel):
     updated_at: int
     permission_rules: list[PermissionRule]
     runtime: SessionRuntime = Field(default_factory=SessionRuntime)
+    kind: SessionKind = "primary"
+    agent_name: str = "primary"
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    parent_tool_call_id: str | None = None
 
 
 class Message(BaseModel):

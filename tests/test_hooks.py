@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -197,6 +198,110 @@ class HookTests(unittest.IsolatedAsyncioTestCase):
             tool = next(m for m in history if m.info.role == "tool")
             txt = "".join([p.text for p in tool.parts if getattr(p, "type", "") == "text"])
             self.assertEqual(txt, "ok")
+
+    async def test_tool_events_publish_input_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "db.sqlite3")
+            store = SQLiteStore(db)
+            await store.init()
+
+            sid = "s1"
+            now = 1
+            session = Session(
+                id=sid,
+                title="t",
+                worktree="/tmp",
+                cwd="/tmp",
+                created_at=now,
+                updated_at=now,
+                permission_rules=[PermissionRule(permission="*", pattern="*", action="allow")],
+            )
+            await store.create_session(session)
+
+            user = Message(
+                id="u1",
+                session_id=sid,
+                role="user",
+                parent_id=None,
+                agent="primary",
+                model=ModelRef(provider="openai-compatible", id="x"),
+                created_at=now,
+            )
+            await store.add_message(user)
+            await store.add_part(
+                sid,
+                user.id,
+                TextPart(id="p1", message_id=user.id, session_id=sid, text="hi"),
+            )
+
+            bus = Bus()
+            hooks = Hooker()
+            perm = PermissionService(bus, store, hooks)
+            tools = ToolRegistry([EchoTool()])
+            cfg = Config(
+                openai=OpenAIConfig(base_url="http://local", api_key="k", model="m"),
+                langfuse=LangfuseConfig(
+                    enabled=False,
+                    public_key="",
+                    secret_key="",
+                    base_url="https://cloud.langfuse.com",
+                    environment="test",
+                    sample_rate=1.0,
+                    debug=False,
+                ),
+                channels=ChannelsConfig(
+                    feishu=FeishuChannelConfig(
+                        enabled=False,
+                        app_id="",
+                        app_secret="",
+                        encrypt_key="",
+                        verification_token="",
+                        allow_from=[],
+                    )
+                ),
+                kb=KBConfig(backend="none", base_url="", api_key=""),
+                vlm=VLMConfig(backend="none", api_url="", api_key="", poll_interval=5, timeout=1800),
+                logging=LoggingConfig(level="INFO", console=True, file=False, dir="./data/logs", rotation="00:00", retention="7 days"),
+                hooks=HooksConfig(debug=False),
+                web_search=WebSearchConfig(tavily_api_key=""),
+                system_prompt="sys",
+                db_path=db,
+                default_worktree="/tmp",
+                default_permission_action="ask",
+                prompt_templates={},
+            )
+            loop = SessionLoop(
+                cfg=cfg,
+                bus=bus,
+                store=store,
+                perm=perm,
+                tools=tools,
+                llm=FakeLLM(),
+                interrupt=InterruptManager(),
+                hooks=hooks,
+            )
+
+            tool_events: list[dict] = []
+
+            async def collect_tool_events() -> None:
+                async for event in bus.subscribe("message.part.updated"):
+                    part = event.properties.get("part") or {}
+                    if part.get("type") != "tool":
+                        continue
+                    tool_events.append(part)
+                    if len(tool_events) >= 3:
+                        return
+
+            collector = asyncio.create_task(collect_tool_events())
+            await asyncio.sleep(0)
+            await loop.run(session_id=sid)
+            await asyncio.wait_for(collector, timeout=1.0)
+
+            statuses = [part["state"]["status"] for part in tool_events]
+            self.assertEqual(statuses, ["pending", "running", "completed"])
+            self.assertEqual(tool_events[0]["state"]["input"], {"x": 1})
+            self.assertEqual(tool_events[1]["state"]["input"], {"x": 1})
+            self.assertEqual(tool_events[2]["state"]["output"], "1")
 
     async def test_llm_error_event_marks_assistant_message_error(self):
         with tempfile.TemporaryDirectory() as tmp:

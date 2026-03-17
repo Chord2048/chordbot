@@ -1,163 +1,162 @@
-# Chord Code (Agent Core, MVP)
+# Chord Code 🤖
 
-Local-first agent core inspired by Open Code: agent loop, tool registry, event bus (SSE), SQLite persistence, and permission gates.
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
+![Runtime](https://img.shields.io/badge/Runtime-Local--First-1F6FEB?style=flat-square)
+![Agent](https://img.shields.io/badge/Agent-Personal%20Assistant-111827?style=flat-square)
 
-## Quickstart
-Requirements:
+> 一个偏工程化、可扩展、可持续运行的个人通用 Agent 助手。  
+> 内置 Web UI、CLI 和 HTTP API，支持权限控制、会话持久化、定时任务、子代理、MCP、技能、知识库、渠道接入与可观测性。
+
+Chord Code 既可以直接作为你的个人 AI 助手，也适合作为二次开发底座，用来构建面向代码、知识、自动化工作流的智能系统。
+
+## ✨ 为什么是 Chord Code
+
+- 🏠 Local-first，默认围绕本地工作区运行，同时支持 Daytona 远程 runtime
+- 🧰 同一套后端同时提供 Web UI、CLI 和 REST API
+- 🔒 内置 permission gate，方便把 Agent 自动化和人工确认结合起来
+- 🧠 支持 workspace 级 memory、知识库检索和技能扩展
+- ⏰ 支持 cronjobs，让 Agent 按计划自动唤醒并持续工作
+- 🛰 支持多渠道接入，当前已实现 Feishu 适配器
+- 📈 提供 Langfuse tracing、结构化日志和 SQLite 持久化
+
+## 🧩 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 🤖 Agent Loop | 支持 session-based 对话、工具调用、事件流和中断控制 |
+| 🖥️ Multi Interface | 内置 Web UI、CLI、REST API，适合手动使用和程序集成 |
+| 🔐 Permission System | 对 bash、文件、外部目录等能力做细粒度授权 |
+| 🗃️ Persistence | 使用 SQLite 持久化 session、message、todo、cron job 和运行历史 |
+| ⏰ Cron Jobs | 定时唤醒已有 session，执行周期性任务 |
+| 🧠 Local Memory | 支持 `memory.md` 与 `memory/YYYY-MM-DD.md` 归档和检索 |
+| 🕵️ Subagents | 支持 read-only `explore` 子代理，适合聚焦调查类任务 |
+| 🔌 Extensibility | 支持 MCP server、skills、知识库检索与文档解析 |
+| 📡 Channel Integration | 支持可扩展渠道机制，当前内置 Feishu |
+| 📊 Observability | 支持 Langfuse tracing 与 JSONL 结构化日志 |
+
+## 🚀 快速开始
+
+### 1. 环境要求
+
 - Python 3.11+
 - `uv`
 
-Setup:
+### 2. 安装依赖
+
 ```bash
-cd chord-code
-cp .env.example .env
 uv sync
 ```
 
-Run:
+### 3. 初始化配置
+
+Chord Code 当前使用 **YAML 配置文件**，不再依赖 `.env`。
+
 ```bash
-cd chord-code
-uv run uvicorn chordcode.api.app:app --reload --port 4096
+mkdir -p ~/.chordcode
+cp config.yaml.example ~/.chordcode/config.yaml
 ```
 
-## Channel Integration (Feishu)
-This project now includes a multi-channel adapter mechanism (extensible), with Feishu implemented in this iteration.
+最少需要配置一个 OpenAI-compatible LLM endpoint：
 
-Example config:
 ```yaml
-channels:
-  feishu:
-    enabled: true
-    app_id: "cli_xxx"
-    app_secret: "xxx"
-    encrypt_key: ""
-    verification_token: ""
-    allow_from: []   # optional whitelist of open_id
+openai:
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "REPLACE_ME"
+  model: "deepseek-chat"
 ```
 
-Runtime status API:
+配置优先级说明：
+
+- 全局配置：`~/.chordcode/config.yaml`
+- 项目级配置：`./.chordcode/config.yaml`
+- 项目级配置会覆盖全局配置
+
+### 4. 启动服务
+
 ```bash
-curl http://127.0.0.1:4096/channels/status
+uv run chordcode serve --reload --port 4096
 ```
 
-## Runtime Backend (Local / Daytona)
-Sessions now support `runtime.backend = local | daytona`.
+启动后访问：
 
-Create Daytona session:
+- Web UI: [http://127.0.0.1:4096](http://127.0.0.1:4096)
+- API Base URL: [http://127.0.0.1:4096](http://127.0.0.1:4096)
+
+### 5. 做一次健康检查
+
 ```bash
-curl -X POST http://127.0.0.1:4096/sessions \
-  -H "content-type: application/json" \
-  -d '{
-    "title": "Daytona Session",
-    "worktree": "/workspace",
-    "runtime": {
-      "backend": "daytona",
-      "daytona": {"sandbox_id": null}
-    }
-  }'
+uv run chordcode doctor
 ```
 
-Configure Daytona in `config.yaml` (or via `DAYTONA_*` env vars):
-```yaml
-daytona:
-  api_key: ""
-  server_url: ""
-  target: ""
-  default_workspace: "/workspace"
-```
+## ⚡ 常见用法
 
-## Cron Jobs
-Agent can now be periodically awakened to run a task in an existing session.
+### 一次性运行一个任务
 
-API examples:
 ```bash
-# Create a job (every 1 hour)
-curl -X POST http://127.0.0.1:4096/cronjobs \
-  -H "content-type: application/json" \
-  -d '{
-    "name": "hourly-summary",
-    "session_id": "<session-id>",
-    "message": "请总结最近进展并给出下一步计划",
-    "schedule": {"kind": "every", "every_ms": 3600000}
-  }'
-
-# List jobs
-curl http://127.0.0.1:4096/cronjobs
+uv run chordcode run "总结当前仓库结构，并给出下一步建议" --permission allow
 ```
 
-CLI examples:
+### 手动管理 Session
+
 ```bash
-chordcode cronjobs create --session-id <session-id> --name hourly-summary --message "请总结最近进展" --kind every --every-ms 3600000
-chordcode cronjobs list
-chordcode cronjobs runs <job-id>
+uv run chordcode sessions create --worktree /path/to/project --title "My Session"
+uv run chordcode sessions list --limit 10
+uv run chordcode agent send <session-id> "继续刚才的任务"
+uv run chordcode agent run <session-id>
 ```
 
-## Local Memory
-Chord Code now supports OpenClaw-style local memory for local sessions.
+### 创建一个定时任务
 
-- Put long-term memory in `memory.md`
-- Put dated memory archives in `memory/YYYY-MM-DD.md`
-- Creating a new local session archives the previous local session into the current day's `memory/YYYY-MM-DD.md`
-- The agent loads `memory.md` into prompt context for local sessions
-- The agent can use `memory_search` and `memory_get` tools to query memory
-- Detailed design and implementation notes: [docs/memory.md](docs/memory.md)
-
-Example config:
-```yaml
-memory:
-  enabled: true
-  embedding_base_url: "https://api.openai.com/v1"
-  embedding_api_key: "REPLACE_ME"
-  embedding_model: "text-embedding-3-small"
-  sync_interval_seconds: 3
+```bash
+uv run chordcode cronjobs create \
+  --session-id <session-id> \
+  --name hourly-summary \
+  --message "请总结最近进展并给出下一步计划" \
+  --kind every \
+  --every-ms 3600000
 ```
 
-## Tests
-Run with pytest (recommended):
+### 查看日志
+
+```bash
+uv run chordcode logs files
+uv run chordcode logs view --level ERROR --limit 20
+```
+
+## 🧠 可扩展能力
+
+- `runtime.backend = local | daytona`：在本地或 Daytona sandbox 中运行 Agent
+- `channels.feishu`：把 Agent 接入飞书
+- `memory`：为本地 workspace 提供长期记忆与归档
+- `web_search.tavily_api_key`：启用 Web Search
+- `kb` / `vlm`：接入知识库与文档解析能力
+- `mcp`：连接外部 MCP server，扩展工具面
+- `skills`：加载项目级或用户级技能，复用固定工作流
+
+## 📚 文档
+
+- [CLI 使用说明](docs/cli.md)
+- [Cron Jobs 设计与用法](docs/cronjobs.md)
+- [Local Memory 设计](docs/memory.md)
+- [Subagents 机制](docs/subagents.md)
+- [变更记录](CHANGES.md)
+
+## 🧪 开发与测试
+
 ```bash
 uv run pytest
 ```
 
-Or with unittest:
+如果你更偏好 `unittest`：
+
 ```bash
 uv run python -m unittest discover -s tests
 ```
 
-## Logging
-This project uses `loguru` and writes:
-- Console: human-friendly, colored logs
-- File: JSONL (one JSON object per line), rotated daily and retained for 7 days by default
+## ⚠️ 使用提示
 
-Recommended usage in code:
-```python
-from chordcode.log import logger
-
-logger.info("Session started", event="session.start", session_id="s1")
-logger.error("Tool failed", event="tool.error", tool_name="bash", exc_info=err)
-
-with logger.context(session_id="s1", message_id="m1", event="session.turn"):
-    logger.debug("Running turn", turn=2)
-```
-
-The old `log.bind(...)`, `log_context(...)`, and `log_event(...)` APIs have been removed.
-
-Env vars (all optional):
-- `CHORDCODE_LOG_LEVEL` (default: `INFO`)
-- `CHORDCODE_LOG_CONSOLE` (default: `true`)
-- `CHORDCODE_LOG_FILE` (default: `true`)
-- `CHORDCODE_LOG_DIR` (default: `./data/logs`)
-- `CHORDCODE_LOG_ROTATION` (default: `00:00`)
-- `CHORDCODE_LOG_RETENTION` (default: `7 days`)
-
-Note: Uvicorn access logs are not included in the JSONL log file. If you want to disable access logs entirely, run Uvicorn with `--no-access-log`.
-
-## Docs
-- `chord-code/docs/project.md`
-- `chord-code/docs/cronjobs.md`
-- `chord-code/docs/memory.md`
-
-## Notes
-- Do not commit `.env` (contains secrets).
-- This project uses an OpenAI-compatible Chat Completions endpoint via env vars (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`).
-- Set `TAVILY_API_KEY` to enable the `websearch` tool (Tavily-based web search).
-- For fast local testing you can set `CHORDCODE_DEFAULT_PERMISSION_ACTION=allow` to bypass permission prompts (recommended to keep `ask` by default).
+- 不要提交包含密钥的配置文件
+- `default_permission_action: allow` 只建议用于本地开发或测试
+- Tavily、Memory Embeddings、Langfuse、Daytona、Feishu、KB/VLM 都是可选增强能力
+- 如果你在寻找一个可长期迭代的个人 Agent 平台，而不是一次性 demo，这个仓库会比“agent shell”更合适

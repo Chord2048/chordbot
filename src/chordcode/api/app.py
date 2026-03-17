@@ -14,6 +14,8 @@ from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from chordcode.agents.service import AgentService
+from chordcode.agents.types import RunRequest
 from chordcode.bus.bus import Bus, Event
 from chordcode.channels import ChannelBus, ChannelManager, ChannelSessionBridge
 from chordcode.channels.events import InboundChannelMessage, OutboundChannelMessage
@@ -41,6 +43,7 @@ from chordcode.tools.daytona import DaytonaBashTool, DaytonaCtx, DaytonaGlobTool
 from chordcode.tools.files import FileCtx, ReadTool, WriteTool
 from chordcode.tools.grep import GlobTool, GrepTool, SearchCtx
 from chordcode.tools.skill import SkillCtx, SkillTool
+from chordcode.tools.task import TaskTool
 from chordcode.tools.todo import TodoWriteTool
 from chordcode.tools.registry import ToolRegistry
 from chordcode.tools.web import TavilySearchTool, WebFetchTool, WebSearchCtx
@@ -108,6 +111,19 @@ channel_bus = ChannelBus()
 channel_manager = ChannelManager(cfg, channel_bus)
 channel_bridge: ChannelSessionBridge | None = None
 cron_service: CronService | None = None
+agent_service = AgentService(
+    cfg=cfg,
+    bus=bus,
+    store=store,
+    perm=perm,
+    llm=llm,
+    interrupt=interrupt,
+    hooks=hooks,
+    memory_service=memory_service,
+    daytona_manager=daytona_manager,
+    mcp_manager=mcp_manager,
+    kb_client=kb_client,
+)
 _session_locks: dict[str, asyncio.Lock] = {}
 _session_locks_guard = asyncio.Lock()
 
@@ -185,99 +201,29 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
 async def _add_user_message(session: Session, text: str, *, source: str = "api") -> str:
     if not text.strip():
         raise HTTPException(status_code=400, detail="text is required")
-
-    now = int(time.time() * 1000)
-    msg = Message(
-        id=str(uuid4()),
-        session_id=session.id,
-        role="user",
-        parent_id=None,
-        agent="primary",
-        model=ModelRef(provider="openai-compatible", id=cfg.openai.model),
-        created_at=now,
-    )
-    out: dict[str, object] = {"text": text}
-    await hooks.trigger(Hook.ChatMessage, {"session_id": session.id, "agent": msg.agent, "message_id": msg.id}, out)
-    text = str(out.get("text") or text)
-
-    await store.add_message(msg)
-    text_part = TextPart(id=str(uuid4()), message_id=msg.id, session_id=session.id, text=text)
-    await store.add_part(session.id, msg.id, text_part)
-    await store.touch_session(session.id)
-
-    await bus.publish(Event(type="message.updated", properties={"session_id": session.id, "info": msg.model_dump()}))
-    await bus.publish(
-        Event(
-            type="message.part.updated",
-            properties={"session_id": session.id, "message_id": msg.id, "part": text_part.model_dump(), "delta": text},
-        ),
-    )
-    logger.info(
-        "User message stored",
-        event="message.user.added",
-        session_id=session.id,
-        message_id=msg.id,
-        source=source,
-        content_chars=len(text),
-    )
-    return msg.id
+    return await agent_service.add_user_message(session, text, source=source)
 
 
 async def _build_tools(session: Session) -> ToolRegistry:
-    runtime_tools: list[Any]
-    if session.runtime.backend == "daytona":
-        sandbox_ref = await daytona_manager.get_sandbox_for_session(session)
-        daytona_ctx = DaytonaCtx(
-            worktree=session.worktree,
-            cwd=session.cwd,
-            sandbox=sandbox_ref.sandbox,
-            sandbox_id=sandbox_ref.sandbox_id,
-            manager=daytona_manager,
-        )
-        runtime_tools = [
-            DaytonaBashTool(daytona_ctx),
-            DaytonaReadTool(daytona_ctx),
-            DaytonaGlobTool(daytona_ctx),
-            DaytonaGrepTool(daytona_ctx),
-            DaytonaWriteTool(daytona_ctx),
-        ]
-    else:
-        runtime_tools = [
-            BashTool(BashCtx(worktree=session.worktree, cwd=session.cwd)),
-            ReadTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-            GlobTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
-            GrepTool(SearchCtx(worktree=session.worktree, cwd=session.cwd)),
-            WriteTool(FileCtx(worktree=session.worktree, cwd=session.cwd)),
-        ]
-
-    builtin_tools = runtime_tools + [
-        TavilySearchTool(WebSearchCtx(tavily_api_key=cfg.web_search.tavily_api_key)),
-        WebFetchTool(),
-        SkillTool(SkillCtx(worktree=session.worktree, cwd=session.cwd, permission_rules=session.permission_rules)),
-        TodoWriteTool(store=store, bus=bus),
-    ]
-
-    if kb_client is not None:
-        builtin_tools.append(KBSearchTool(KBSearchCtx(kb=kb_client)))
-
-    if session.runtime.backend == "local" and memory_service.enabled:
-        manager = await memory_service.get_manager(session.worktree)
-        if manager is not None:
-            memory_ctx = MemoryToolCtx(manager=manager)
-            builtin_tools.extend([MemorySearchTool(memory_ctx), MemoryGetTool(memory_ctx)])
-
-    mcp_tool_infos = await mcp_manager.list_tools()
-    mcp_tools = [MCPToolAdapter(info, mcp_manager) for info in mcp_tool_infos]
-    return ToolRegistry(builtin_tools + mcp_tools)
+    return await agent_service.build_tools(session, session.agent_name)
 
 
 async def _run_agent_once(session: Session, *, source: str = "api") -> tuple[str, str | None]:
     lock = await _get_session_lock(session.id)
     async with lock:
-        tools = await _build_tools(session)
-        loop = SessionLoop(cfg=cfg, bus=bus, store=store, perm=perm, tools=tools, llm=llm, interrupt=interrupt, hooks=hooks)
         logger.info("Running session loop", event="session.run.requested", session_id=session.id, source=source)
-        return await loop.run(session_id=session.id, source=source)
+        result = await agent_service.run(
+            RunRequest(
+                session_id=session.id,
+                agent_name=session.agent_name,
+                source=source,
+                root_session_id=session.root_session_id or session.id,
+                parent_session_id=session.parent_session_id,
+                parent_tool_call_id=session.parent_tool_call_id,
+                limits=agent_service.get_agent(session.agent_name).limits,
+            )
+        )
+        return result.assistant_message_id, result.trace_id
 
 
 def _require_cron_service() -> CronService:
@@ -336,8 +282,9 @@ async def _resolve_or_create_channel_session(msg: InboundChannelMessage) -> Sess
 
     now = int(time.time() * 1000)
     title = f"[{msg.channel}] {msg.chat_id}"
+    session_id = str(uuid4())
     s = Session(
-        id=str(uuid4()),
+        id=session_id,
         title=title,
         worktree=runtime_cfg.default_worktree,
         cwd=runtime_cfg.default_worktree,
@@ -345,6 +292,9 @@ async def _resolve_or_create_channel_session(msg: InboundChannelMessage) -> Sess
         updated_at=now,
         permission_rules=_build_feishu_channel_rules(runtime_cfg),
         runtime=SessionRuntime(backend="local"),
+        kind="primary",
+        agent_name="primary",
+        root_session_id=session_id,
     )
     await store.create_session(s)
     await memory_service.ensure_worktree(s.worktree)
@@ -791,8 +741,9 @@ async def create_session(body: CreateSessionRequest):
 
     permission_rules = [PermissionRule.model_validate(x) for x in body.permission_rules] if body.permission_rules else _default_rules()
     now = int(time.time() * 1000)
+    session_id = str(uuid4())
     s = Session(
-        id=str(uuid4()),
+        id=session_id,
         title=title,
         worktree=worktree,
         cwd=cwd,
@@ -800,6 +751,9 @@ async def create_session(body: CreateSessionRequest):
         updated_at=now,
         permission_rules=permission_rules,
         runtime=runtime,
+        kind="primary",
+        agent_name="primary",
+        root_session_id=session_id,
     )
     await store.create_session(s)
     if runtime_backend == "local":
@@ -832,9 +786,19 @@ async def create_session(body: CreateSessionRequest):
 
 
 @app.get("/sessions")
-async def list_sessions(limit: int = 50, offset: int = 0):
+async def list_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    include_children: bool = False,
+    parent_session_id: str | None = None,
+):
     """List all sessions, ordered by updated_at desc."""
-    sessions = await store.list_sessions(limit=limit, offset=offset)
+    sessions = await store.list_sessions(
+        limit=limit,
+        offset=offset,
+        include_children=include_children,
+        parent_session_id=parent_session_id,
+    )
     refreshed: list[Session] = []
     for s in sessions:
         refreshed.append(await _refresh_daytona_runtime_metadata(s))

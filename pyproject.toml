@@ -41,6 +41,7 @@ chordcode = [
     "web/**/*",
     "web/*",
     "prompts/*.txt",
+    "prompts/agents/*.txt",
 ]
 
 [tool.pytest.ini_options]

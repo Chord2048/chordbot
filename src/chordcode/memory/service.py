@@ -63,6 +63,8 @@ class MemoryService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        for manager in list(self._managers.values()):
+            await manager.close()
         _log.info("Memory service stopped", event="memory.service.stopped")
 
     async def ensure_worktree(self, worktree: str) -> MemoryManager | None:
@@ -111,7 +113,7 @@ class MemoryService:
             await asyncio.sleep(interval)
             for worktree, manager in list(self._managers.items()):
                 try:
-                    await manager.sync_if_stale()
+                    await manager.schedule_sync_if_stale()
                 except Exception as exc:
                     _log.warning(
                         "Memory sync failed",
@@ -173,10 +175,7 @@ class MemoryService:
         archive_path.write_text(append_archive_entry(existing, payload.content), encoding="utf-8")
         manager = await self.ensure_worktree(new_session.worktree)
         if manager is not None:
-            await manager.sync()
-            stats = await manager.describe_sources()
-        else:
-            stats = {}
+            await manager.schedule_sync(force=True)
 
         _log.info(
             "Archived previous session into memory log",
@@ -189,9 +188,7 @@ class MemoryService:
             archive_path=payload.rel_path,
             source_message_count=payload.source_message_count,
             included_message_count=payload.included_message_count,
-            archive_file_count=stats.get("archive_file_count"),
-            indexed_file_count=stats.get("indexed_file_count"),
-            indexed_chunk_count=stats.get("indexed_chunk_count"),
+            sync_scheduled=manager is not None,
         )
         return payload.rel_path
 
@@ -202,6 +199,7 @@ class MemoryService:
             session
             for session in sessions
             if session.id != new_session.id
+            and session.kind == "primary"
             and session.runtime.backend == "local"
             and str(Path(session.worktree).resolve()) == resolved_worktree
             and session.created_at <= new_session.created_at

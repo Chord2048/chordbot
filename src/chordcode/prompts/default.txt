@@ -54,4 +54,5 @@ The user will primarily request you perform software engineering tasks. This inc
 
 # Tool usage policy
 - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel.
+- If you want multiple subagents to run in parallel, emit a single assistant response that contains only multiple `task` tool calls. Do not mix `task` with other tools in that same response.
 - Use specialized tools instead of bash commands when possible. For file operations, use Read for reading files and Write for creating files. For code search, use Glob to find files by pattern and Grep to search file contents. Reserve bash tools exclusively for actual system commands and terminal operations.

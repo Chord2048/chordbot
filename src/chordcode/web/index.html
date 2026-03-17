@@ -229,6 +229,13 @@
       const [expandedLogLineNo, setExpandedLogLineNo] = useState(null);
       const [logFiltersInitialized, setLogFiltersInitialized] = useState(false);
       const [sessionAction, setSessionAction] = useState({ renamingId: null, deletingId: null });
+      const [showSubagentSessions, setShowSubagentSessions] = useState(() => {
+        try {
+          return localStorage.getItem('cc_show_subagent_sessions') === 'true';
+        } catch (_e) {
+          return false;
+        }
+      });
 
       // Activity bar + side panel state
       const [activeSidePanel, setActiveSidePanel] = useState('chat');
@@ -259,6 +266,78 @@
       // Resizable panels
       const sidebar = useResizable(260, { min: 180, max: 500, side: 'left', storageKey: 'cc_sidebar_w' });
       const observability = useResizable(320, { min: 200, max: 600, side: 'right', storageKey: 'cc_obs_w' });
+      const showSubagentSessionsRef = useRef(showSubagentSessions);
+      const activeSessionIdRef = useRef(activeSessionId);
+      const sessionsRef = useRef(sessions);
+      const loadSessionsRef = useRef(null);
+
+      useEffect(() => {
+        showSubagentSessionsRef.current = showSubagentSessions;
+        try {
+          localStorage.setItem('cc_show_subagent_sessions', showSubagentSessions ? 'true' : 'false');
+        } catch (_e) {}
+      }, [showSubagentSessions]);
+
+      useEffect(() => {
+        activeSessionIdRef.current = activeSessionId;
+      }, [activeSessionId]);
+
+      useEffect(() => {
+        sessionsRef.current = sessions;
+      }, [sessions]);
+
+      async function loadSessions(options = {}) {
+        const includeChildren = options.includeChildren ?? showSubagentSessionsRef.current;
+        const preserveSelection = options.preserveSelection ?? true;
+        const autoselectFirst = options.autoselectFirst ?? false;
+        const params = new URLSearchParams();
+        if (includeChildren) {
+          params.set('include_children', 'true');
+        }
+        const data = await api('/sessions' + (params.toString() ? '?' + params.toString() : ''));
+        const sessionList = sortSessionsByUpdated(data.sessions || []);
+        setSessions(sessionList);
+
+        const currentActiveId = activeSessionIdRef.current;
+        if (!currentActiveId) {
+          if (autoselectFirst && sessionList.length > 0) {
+            await selectSession(sessionList[0].id);
+          }
+          return sessionList;
+        }
+
+        if (!preserveSelection) {
+          return sessionList;
+        }
+
+        if (sessionList.some(s => s.id === currentActiveId)) {
+          return sessionList;
+        }
+
+        const previousActive = sessionsRef.current.find(s => s.id === currentActiveId);
+        let fallbackId = null;
+        if (
+          !includeChildren &&
+          previousActive &&
+          previousActive.kind === 'subagent' &&
+          previousActive.parent_session_id &&
+          sessionList.some(s => s.id === previousActive.parent_session_id)
+        ) {
+          fallbackId = previousActive.parent_session_id;
+        } else if (sessionList.length > 0) {
+          fallbackId = sessionList[0].id;
+        }
+
+        if (fallbackId) {
+          await selectSession(fallbackId);
+        } else {
+          clearSessionView();
+        }
+        return sessionList;
+      }
+
+      loadSessionsRef.current = loadSessions;
+
       // Handle SSE events
       const handleSSEEvent = useCallback((event) => {
         const { type, properties } = event;
@@ -307,6 +386,16 @@
           case 'todo.updated':
             setTodos(properties.todos || []);
             break;
+
+          case 'task.started':
+          case 'task.finished':
+          case 'task.failed':
+            if (showSubagentSessionsRef.current && loadSessionsRef.current) {
+              loadSessionsRef.current({ preserveSelection: true }).catch(e => {
+                console.error('Sessions refresh error:', e);
+              });
+            }
+            break;
         }
       }, []);
 
@@ -316,15 +405,13 @@
           setDefaultWorktree(cfg.default_worktree || '');
           setDefaultDaytonaWorkspace((cfg.daytona && cfg.daytona.default_workspace) || '/workspace');
         }).catch(e => console.error('Config error:', e));
-
-        api('/sessions').then(data => {
-          const sessionList = sortSessionsByUpdated(data.sessions || []);
-          setSessions(sessionList);
-          if (data.sessions && data.sessions.length > 0) {
-            selectSession(sessionList[0].id);
-          }
-        }).catch(e => console.error('Sessions error:', e));
       }, []);
+
+      useEffect(() => {
+        loadSessions({ autoselectFirst: true, preserveSelection: true }).catch(e => {
+          console.error('Sessions error:', e);
+        });
+      }, [showSubagentSessions]);
 
       useEffect(() => {
         if (!logFiltersInitialized && activeSessionId) {
@@ -773,6 +860,8 @@
               onDelete=${deleteSession}
               showForm=${showNewSessionForm}
               onToggleForm=${() => setShowNewSessionForm(!showNewSessionForm)}
+              showSubagentSessions=${showSubagentSessions}
+              onToggleShowSubagentSessions=${() => setShowSubagentSessions(prev => !prev)}
               defaultWorktree=${defaultWorktree}
               defaultDaytonaWorkspace=${defaultDaytonaWorkspace}
               renamingId=${sessionAction.renamingId}
@@ -907,7 +996,8 @@
     function SidePanel({
       activeSidePanel,
       sessions, activeId, onSelect, onCreate, onRename, onDelete,
-      showForm, onToggleForm, defaultWorktree, defaultDaytonaWorkspace, renamingId, deletingId,
+      showForm, onToggleForm, showSubagentSessions, onToggleShowSubagentSessions,
+      defaultWorktree, defaultDaytonaWorkspace, renamingId, deletingId,
       mcpServers, mcpTools, mcpLoading, mcpError,
       onMcpRefresh, onMcpConnect, onMcpDisconnect, onMcpAddServer,
       skills, skillsLoading, skillsError, onSkillsRefresh, onLoadSkillDetail,
@@ -924,6 +1014,8 @@
               onDelete=${onDelete}
               showForm=${showForm}
               onToggleForm=${onToggleForm}
+              showSubagentSessions=${showSubagentSessions}
+              onToggleShowSubagentSessions=${onToggleShowSubagentSessions}
               defaultWorktree=${defaultWorktree}
               defaultDaytonaWorkspace=${defaultDaytonaWorkspace}
               renamingId=${renamingId}
@@ -965,6 +1057,8 @@
       onDelete,
       showForm,
       onToggleForm,
+      showSubagentSessions,
+      onToggleShowSubagentSessions,
       defaultWorktree,
       defaultDaytonaWorkspace,
       renamingId,
@@ -976,6 +1070,20 @@
       const [daytonaSandboxId, setDaytonaSandboxId] = useState('');
       const [editingSessionId, setEditingSessionId] = useState(null);
       const [editingTitle, setEditingTitle] = useState('');
+      const [collapsedSessionIds, setCollapsedSessionIds] = useState(() => {
+        try {
+          const raw = JSON.parse(localStorage.getItem('cc_session_tree_collapsed') || '[]');
+          return Array.isArray(raw) ? raw : [];
+        } catch (_e) {
+          return [];
+        }
+      });
+
+      useEffect(() => {
+        try {
+          localStorage.setItem('cc_session_tree_collapsed', JSON.stringify(collapsedSessionIds));
+        } catch (_e) {}
+      }, [collapsedSessionIds]);
 
       useEffect(() => {
         if (defaultWorktree && !worktree) {
@@ -1000,6 +1108,49 @@
           setEditingTitle('');
         }
       }, [sessions, editingSessionId]);
+
+      const parentById = useMemo(() => {
+        const map = new Map();
+        sessions.forEach(s => {
+          map.set(s.id, s.parent_session_id || null);
+        });
+        return map;
+      }, [sessions]);
+
+      const childrenByParent = useMemo(() => {
+        const map = new Map();
+        sessions.forEach(s => {
+          if (!s.parent_session_id) return;
+          const siblings = map.get(s.parent_session_id) || [];
+          siblings.push(s);
+          map.set(s.parent_session_id, siblings);
+        });
+        return map;
+      }, [sessions]);
+
+      const rootSessions = useMemo(
+        () => sessions.filter(s => !s.parent_session_id),
+        [sessions]
+      );
+
+      const activeAncestorIds = useMemo(() => {
+        const ids = [];
+        let cursor = activeId;
+        while (cursor) {
+          const parentId = parentById.get(cursor);
+          if (!parentId) break;
+          ids.push(parentId);
+          cursor = parentId;
+        }
+        return ids;
+      }, [activeId, parentById]);
+
+      useEffect(() => {
+        if (activeAncestorIds.length === 0) return;
+        setCollapsedSessionIds(prev => prev.filter(id => !activeAncestorIds.includes(id)));
+      }, [activeAncestorIds]);
+
+      const collapsedSet = useMemo(() => new Set(collapsedSessionIds), [collapsedSessionIds]);
 
       function handleCreate(e) {
         e.preventDefault();
@@ -1049,6 +1200,153 @@
       function requestDelete(e, sessionId) {
         e.stopPropagation();
         onDelete(sessionId);
+      }
+
+      function toggleBranch(e, sessionId) {
+        e.stopPropagation();
+        setCollapsedSessionIds(prev => (
+          prev.includes(sessionId)
+            ? prev.filter(id => id !== sessionId)
+            : [...prev, sessionId]
+        ));
+      }
+
+      function renderSessionNode(session) {
+        const isEditing = editingSessionId === session.id;
+        const isDaytona = !!(session.runtime && session.runtime.backend === 'daytona');
+        const isSubagent = session.kind === 'subagent';
+        const sandboxId = isDaytona ? (session.runtime.daytona && session.runtime.daytona.sandbox_id) : '';
+        const sandboxName = isDaytona ? (session.runtime.daytona && session.runtime.daytona.sandbox_name) : '';
+        const children = showSubagentSessions ? (childrenByParent.get(session.id) || []) : [];
+        const hasChildren = children.length > 0;
+        const forcedExpanded = activeAncestorIds.includes(session.id);
+        const isCollapsed = hasChildren && !forcedExpanded && collapsedSet.has(session.id);
+
+        return html`
+          <div key=${session.id} class="session-tree-node">
+            <div
+              class="session-item ${session.id === activeId ? 'active' : ''} ${isSubagent ? 'subagent' : ''}"
+              onClick=${() => {
+                if (!isEditing) onSelect(session.id);
+              }}
+            >
+              <div class="session-item-gutter">
+                ${hasChildren ? html`
+                  <button
+                    type="button"
+                    class="session-tree-toggle ${isCollapsed ? 'collapsed' : 'expanded'}"
+                    title=${isCollapsed ? 'Expand child sessions' : 'Collapse child sessions'}
+                    aria-label=${isCollapsed ? 'Expand child sessions' : 'Collapse child sessions'}
+                    aria-expanded=${isCollapsed ? 'false' : 'true'}
+                    onClick=${(e) => toggleBranch(e, session.id)}
+                  >
+                    ${isCollapsed ? '\u25B8' : '\u25BE'}
+                  </button>
+                ` : html`<span class="session-tree-spacer"></span>`}
+                <div class="session-item-indicator"></div>
+              </div>
+              <div class="session-item-content">
+                ${isEditing ? html`
+                  <form
+                    class="session-rename-form"
+                    onSubmit=${(e) => submitRename(e, session.id)}
+                    onClick=${(e) => e.stopPropagation()}
+                  >
+                    <input
+                      class="input session-rename-input"
+                      type="text"
+                      value=${editingTitle}
+                      onInput=${(e) => setEditingTitle(e.target.value)}
+                      onKeyDown=${(e) => {
+                        if (e.key === 'Escape') {
+                          cancelRename(e);
+                        }
+                      }}
+                      disabled=${renamingId === session.id}
+                      autoFocus
+                    />
+                    <div class="session-rename-actions">
+                      <button
+                        type="submit"
+                        class="session-action-btn"
+                        title="Save"
+                        aria-label="Save session title"
+                        disabled=${renamingId === session.id || !editingTitle.trim()}
+                      >
+                        \u2713
+                      </button>
+                      <button
+                        type="button"
+                        class="session-action-btn"
+                        title="Cancel"
+                        aria-label="Cancel session rename"
+                        onClick=${cancelRename}
+                        disabled=${renamingId === session.id}
+                      >
+                        \u2715
+                      </button>
+                    </div>
+                  </form>
+                ` : html`
+                  <div class="session-item-title">
+                    <span class="session-title-text" title=${session.title}>${session.title}</span>
+                    ${isSubagent && html`<span class="session-kind-badge">${session.agent_name || 'subagent'}</span>`}
+                    ${isDaytona && html`<span class="session-runtime-badge">daytona</span>`}
+                  </div>
+                  <div class="session-item-meta">${formatRelative(session.updated_at)}</div>
+                  ${isSubagent && session.parent_session_id && html`
+                    <div
+                      class="session-item-meta session-subagent-line"
+                      title=${'parent session: ' + session.parent_session_id}
+                    >
+                      parent ${shortId(session.parent_session_id)}
+                    </div>
+                  `}
+                  ${hasChildren && html`
+                    <div class="session-item-meta session-children-meta">
+                      ${children.length} subagent session${children.length > 1 ? 's' : ''}
+                    </div>
+                  `}
+                  ${isDaytona && sandboxId && html`
+                    <div
+                      class="session-item-meta session-runtime-line"
+                      title=${"sandbox: " + sandboxId + (sandboxName ? " (" + sandboxName + ")" : "")}
+                    >
+                      sbx ${shortId(sandboxId)}${sandboxName ? ' · ' + sandboxName : ''}
+                    </div>
+                  `}
+                `}
+              </div>
+              ${!isEditing && html`
+                <div class="session-item-actions" onClick=${(e) => e.stopPropagation()}>
+                  <button
+                    class="session-action-btn"
+                    title="Rename"
+                    aria-label="Rename session"
+                    onClick=${(e) => startRename(e, session)}
+                    disabled=${deletingId === session.id}
+                  >
+                    \u270E
+                  </button>
+                  <button
+                    class="session-action-btn danger"
+                    title="Delete"
+                    aria-label="Delete session"
+                    onClick=${(e) => requestDelete(e, session.id)}
+                    disabled=${deletingId === session.id || renamingId === session.id}
+                  >
+                    ${deletingId === session.id ? '\u2026' : '\u{1F5D1}'}
+                  </button>
+                </div>
+              `}
+            </div>
+            ${hasChildren && !isCollapsed && html`
+              <div class="session-tree-children">
+                ${children.map(child => renderSessionNode(child))}
+              </div>
+            `}
+          </div>
+        `;
       }
 
       return html`
@@ -1118,111 +1416,33 @@
           `}
 
           <div class="sidebar-content">
-            <div class="sidebar-title">Sessions</div>
+            <div class="sidebar-section-header">
+              <div class="sidebar-title-group">
+                <div class="sidebar-title">Sessions</div>
+                <div class="sidebar-caption">Active workspace conversations</div>
+              </div>
+              <label class="session-toggle" title="Show subagent sessions in the sidebar">
+                <input
+                  type="checkbox"
+                  checked=${showSubagentSessions}
+                  onChange=${onToggleShowSubagentSessions}
+                />
+                <span class="session-toggle-control">
+                  <span class="session-toggle-label">Subagents</span>
+                  <span class="session-toggle-track">
+                    <span class="session-toggle-thumb"></span>
+                  </span>
+                </span>
+              </label>
+            </div>
             <div class="session-list">
-              ${sessions.length === 0 && html`
+              ${rootSessions.length === 0 && html`
                 <div class="session-empty">
                   <div class="session-empty-icon">\u{1F4AC}</div>
                   <div class="session-empty-text">No sessions yet</div>
                 </div>
               `}
-              ${sessions.map(s => {
-                const isEditing = editingSessionId === s.id;
-                const isDaytona = !!(s.runtime && s.runtime.backend === 'daytona');
-                const sandboxId = isDaytona ? (s.runtime.daytona && s.runtime.daytona.sandbox_id) : '';
-                const sandboxName = isDaytona ? (s.runtime.daytona && s.runtime.daytona.sandbox_name) : '';
-                return html`
-                  <div
-                    key=${s.id}
-                    class="session-item ${s.id === activeId ? 'active' : ''}"
-                    onClick=${() => {
-                      if (!isEditing) onSelect(s.id);
-                    }}
-                  >
-                    <div class="session-item-indicator"></div>
-                    <div class="session-item-content">
-                      ${isEditing ? html`
-                        <form
-                          class="session-rename-form"
-                          onSubmit=${(e) => submitRename(e, s.id)}
-                          onClick=${(e) => e.stopPropagation()}
-                        >
-                          <input
-                            class="input session-rename-input"
-                            type="text"
-                            value=${editingTitle}
-                            onInput=${(e) => setEditingTitle(e.target.value)}
-                            onKeyDown=${(e) => {
-                              if (e.key === 'Escape') {
-                                cancelRename(e);
-                              }
-                            }}
-                            disabled=${renamingId === s.id}
-                            autoFocus
-                          />
-                          <div class="session-rename-actions">
-                            <button
-                              type="submit"
-                              class="session-action-btn"
-                              title="Save"
-                              aria-label="Save session title"
-                              disabled=${renamingId === s.id || !editingTitle.trim()}
-                            >
-                              \u2713
-                            </button>
-                            <button
-                              type="button"
-                              class="session-action-btn"
-                              title="Cancel"
-                              aria-label="Cancel session rename"
-                              onClick=${cancelRename}
-                              disabled=${renamingId === s.id}
-                            >
-                              \u2715
-                            </button>
-                          </div>
-                        </form>
-                      ` : html`
-                        <div class="session-item-title">
-                          <span class="session-title-text" title=${s.title}>${s.title}</span>
-                          ${isDaytona && html`<span class="session-runtime-badge">daytona</span>`}
-                        </div>
-                        <div class="session-item-meta">${formatRelative(s.updated_at)}</div>
-                        ${isDaytona && sandboxId && html`
-                          <div
-                            class="session-item-meta session-runtime-line"
-                            title=${"sandbox: " + sandboxId + (sandboxName ? " (" + sandboxName + ")" : "")}
-                          >
-                            sbx ${shortId(sandboxId)}${sandboxName ? ' · ' + sandboxName : ''}
-                          </div>
-                        `}
-                      `}
-                    </div>
-                    ${!isEditing && html`
-                      <div class="session-item-actions" onClick=${(e) => e.stopPropagation()}>
-                        <button
-                          class="session-action-btn"
-                          title="Rename"
-                          aria-label="Rename session"
-                          onClick=${(e) => startRename(e, s)}
-                          disabled=${deletingId === s.id}
-                        >
-                          \u270E
-                        </button>
-                        <button
-                          class="session-action-btn danger"
-                          title="Delete"
-                          aria-label="Delete session"
-                          onClick=${(e) => requestDelete(e, s.id)}
-                          disabled=${deletingId === s.id || renamingId === s.id}
-                        >
-                          ${deletingId === s.id ? '\u2026' : '\u{1F5D1}'}
-                        </button>
-                      </div>
-                    `}
-                  </div>
-                `;
-              })}
+              ${rootSessions.map(session => renderSessionNode(session))}
             </div>
           </div>
         </div>

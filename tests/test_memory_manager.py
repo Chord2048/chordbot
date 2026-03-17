@@ -171,8 +171,44 @@ class MemoryManagerTests(unittest.IsolatedAsyncioTestCase):
 
             manager = await service.get_manager(str(worktree))
             assert manager is not None
+            await manager.wait_for_sync()
             result = await manager.search(query="alpha launch", max_results=3, min_score=0.01)
             self.assertTrue(any(hit["path"] == archive_rel_path for hit in result["hits"]))
+
+    async def test_search_schedules_stale_sync_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            memory_file = worktree / "memory.md"
+            memory_file.write_text("alpha project note\n", encoding="utf-8")
+
+            manager = MemoryManager(
+                worktree=tmp,
+                config=MemoryConfig(sync_interval_seconds=3600),
+                db_path=build_memory_db_path(str(worktree / "app.sqlite3"), tmp),
+                embedding_provider=None,
+            )
+            await manager.init()
+            await manager.sync()
+
+            release_sync = asyncio.Event()
+            sync_started = asyncio.Event()
+            original_sync = manager.sync
+
+            async def slow_sync() -> None:
+                sync_started.set()
+                await release_sync.wait()
+                await original_sync()
+
+            memory_file.write_text("beta project note\n", encoding="utf-8")
+            with patch.object(manager, "sync", side_effect=slow_sync):
+                result = await asyncio.wait_for(manager.search(query="alpha project", max_results=3, min_score=0.01), timeout=0.2)
+                self.assertTrue(any("alpha project note" in hit["snippet"] for hit in result["hits"]))
+                await asyncio.wait_for(sync_started.wait(), timeout=0.2)
+                release_sync.set()
+                await manager.wait_for_sync()
+
+            refreshed = await manager.search(query="beta project", max_results=3, min_score=0.01)
+            self.assertTrue(any("beta project note" in hit["snippet"] for hit in refreshed["hits"]))
 
     async def test_search_detects_stale_files_before_interval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,7 +235,12 @@ class MemoryManagerTests(unittest.IsolatedAsyncioTestCase):
             archive.write_text("release checklist\ntodo next step\n", encoding="utf-8")
             second = await manager.search(query="todo next step", max_results=3, min_score=0.01)
             second_hits = second["hits"]
-            self.assertTrue(any("todo next step" in hit["snippet"] for hit in second_hits))
+            self.assertFalse(any("todo next step" in hit["snippet"] for hit in second_hits))
+            await manager.wait_for_sync()
+
+            refreshed = await manager.search(query="todo next step", max_results=3, min_score=0.01)
+            refreshed_hits = refreshed["hits"]
+            self.assertTrue(any("todo next step" in hit["snippet"] for hit in refreshed_hits))
 
     async def test_sync_reuses_embeddings_for_unchanged_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +292,80 @@ class MemoryManagerTests(unittest.IsolatedAsyncioTestCase):
             with patch("chordcode.memory.manager.chunk_markdown", return_value=[chunk_one, chunk_three]):
                 await manager.sync()
             self.assertEqual(provider.calls[1], ["todo replacement"])
+
+    async def test_archive_schedules_sync_without_waiting_for_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worktree"
+            worktree.mkdir()
+
+            db_path = str(root / "app.sqlite3")
+            cfg = make_config(db_path=db_path, worktree=str(worktree), sync_interval_seconds=3600)
+            store = SQLiteStore(db_path)
+            await store.init()
+
+            previous = Session(
+                id="s1",
+                title="Previous Session",
+                worktree=str(worktree),
+                cwd=str(worktree),
+                created_at=1,
+                updated_at=2,
+                permission_rules=[PermissionRule(permission="*", pattern="*", action="allow")],
+                runtime=SessionRuntime(backend="local"),
+            )
+            current = Session(
+                id="s2",
+                title="Current Session",
+                worktree=str(worktree),
+                cwd=str(worktree),
+                created_at=3,
+                updated_at=3,
+                permission_rules=[PermissionRule(permission="*", pattern="*", action="allow")],
+                runtime=SessionRuntime(backend="local"),
+            )
+            await store.create_session(previous)
+            await store.create_session(current)
+
+            from chordcode.model import Message, ModelRef, TextPart
+
+            user_msg = Message(
+                id="m1",
+                session_id=previous.id,
+                role="user",
+                agent="primary",
+                model=ModelRef(provider="openai-compatible", id="m"),
+                created_at=10,
+            )
+            await store.add_message(user_msg)
+            await store.add_part(
+                previous.id,
+                user_msg.id,
+                TextPart(id="p1", message_id=user_msg.id, session_id=previous.id, text="Archive this note"),
+            )
+
+            service = MemoryService(cfg=cfg, store=store, embedding_provider_factory=lambda _cfg: None)
+            manager = await service.ensure_worktree(str(worktree))
+            assert manager is not None
+
+            release_sync = asyncio.Event()
+            sync_started = asyncio.Event()
+            original_sync = manager.sync
+
+            async def slow_sync() -> None:
+                sync_started.set()
+                await release_sync.wait()
+                await original_sync()
+
+            with patch.object(manager, "sync", side_effect=slow_sync):
+                archive_rel_path = await asyncio.wait_for(service.archive_previous_session_for_new_session(current), timeout=0.2)
+                self.assertIsNotNone(archive_rel_path)
+                await asyncio.wait_for(sync_started.wait(), timeout=0.2)
+                release_sync.set()
+                await manager.wait_for_sync()
+
+            archive_file = worktree / str(archive_rel_path)
+            self.assertTrue(archive_file.is_file())
 
     async def test_service_background_sync_updates_existing_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,6 +6,8 @@
 
 `Chord Code` 是一个 **local-first 的 Agent Core（MVP）**：提供 Agent loop + Tool registry + Permission gate + SSE 事件流 + SQLite 持久化，并附带一个简单的 Web UI 用于可视化 session/message/parts/permissions/events。
 
+**如果本次任务涉及 `task` 工具、subagent、child session、并行 task batch、或 multi-agent 相关扩展，先阅读 `docs/subagents.md`。**
+
 ## 1. 项目目标 / 非目标
 
 **目标**
@@ -17,7 +19,7 @@
 **暂不作为 v0.1.x 强目标（但在 Roadmap 中）**
 - Context compaction / memory / summary
 - 插件自动加载（Plugin loader）与更完整的插件生态
-- 多 Agent（plan/build/explore/compaction 等）与子任务编排
+- 更复杂的 Multi-Agent 机制（Agent Teams / Agent-to-Agent）
 - sandbox runtime / 远程执行环境
 
 ## 2. 当前开发进度（以仓库为准）
@@ -31,6 +33,7 @@
 - 事件总线（进程内 pub/sub）+ SSE：`src/chordcode/bus/bus.py`、`/events`
 - SQLite 持久化：`src/chordcode/store/sqlite.py`
 - 工具（当前：bash/read/write/skill/todowrite/websearch/webfetch）与 registry：`src/chordcode/tools/*`
+- Subagent 基础设施（`AgentRegistry` / `RunRequest` / child sessions / `task` tool / parallel task batches）：`src/chordcode/agents/*`、`src/chordcode/tools/task.py`
 - MCP 客户端（发现配置、管理连接、暴露 MCP 工具给 LLM）：`src/chordcode/mcp/*`
 - Hooks（用于在关键生命周期点做可插拔改写/观测）：`src/chordcode/hooks.py`、`src/chordcode/hookdefs.py`
 - YAML 配置系统（全局 + 项目级深度合并、字段元数据注册、Settings UI）：`src/chordcode/config.py`、`src/chordcode/config_schema.py`
@@ -41,7 +44,8 @@
 - `FastAPI(title="Chord Code", version="0.1.0")` 与文档 v0.1.1 标记可能不一致：以 `docs/project.md` + `CHANGES.md` 记录为主，必要时同步版本号。
 
 **近期方向（Owner 已确认）**
-- 优先扩展内置工具：`Todo`（生成计划）、`Task`（子 Agent 派发任务）、`skill`（按需加载 skills）。
+- 已落地 V1 subagent delegation：primary agent 通过 `task` 工具唤起 `explore` child session。
+- 下一阶段 Multi-Agent 重点是更复杂的编排机制：`Agent Teams`、`Agent-to-Agent`、更多内置 subagent 类型。
 - 现有策略保持默认 `ask`，但增加“免 ask”的快速测试开关（仅限本地开发）。
 - 工程化建设：日志、运行脚本、CLI 调试工具，让 Claude Code 等 Coding Agent 更容易验证/迭代本项目。
 
@@ -124,11 +128,14 @@ chordcode run "Reply PONG" --permission allow  # 端到端测试
 - `src/chordcode/config_schema.py`：配置字段元数据注册（key/description/default/sensitive/choices），供 Settings UI 与默认值生成使用
 - `src/chordcode/model.py`：Message/Part/Permission 等 Pydantic 模型（前后端对齐的"协议层"）
 - `src/chordcode/tools/`：工具实现（bash/read/write/skill/todowrite/websearch/webfetch）+ path 限制/截断 + registry
+- `src/chordcode/agents/`：agent 定义、registry、task delegation service、run request/result
+- `src/chordcode/tools/task.py`：主 agent 委派 subagent 的入口工具
 - `src/chordcode/mcp/`：MCP 客户端支持（config 加载、server 连接管理、tool adapter）
 - `src/chordcode/permission/service.py`：权限询问与规则匹配、pending approvals、reply 流程
 - `src/chordcode/store/sqlite.py`：表结构与 CRUD
 - `src/chordcode/web/`：前端渲染（按 Message Header + Part 展示、权限面板、事件面板、Settings 面板）
 - `docs/project.md`：本项目当前架构/数据流/API/事件结构（强烈建议先看）
+- `docs/subagents.md`：subagent 的设计、task 工具契约、parallel batch、child session 与可观测性实现
 - `CHANGES.md`：版本间改动点与决策背景
 
 ## 6. 开发约定（写代码前先对齐）
@@ -172,7 +179,7 @@ uv run python -m pytest tests/ -v
 **内置工具（当前与近期）**
 - `todowrite`：已实现。输入结构化 todo 列表，输出任务状态与统计，用于过程跟踪。
 - `skill`：已实现。按名称加载技能正文（`skill(name=...)`）；可用技能列表通过 `skill` 工具 description 内嵌的 `<available_skills>` 暴露。
-- `task`：规划中。输入“任务说明 + 目标输出格式 + 限制”，输出子任务结果摘要（后续接入真正的 subagent runtime）。
+- `task`：已实现。primary agent 可把子任务委派给 `explore` subagent；child run 落在独立 session，结果以标准化 tool output 回收到 parent。
 
 **Skills 功能说明（已实现 v1）**
 - `Skills 是什么`：Skill 是一个可版本化的能力包目录，核心文件是 `SKILL.md`（YAML frontmatter + Markdown 正文）；模型平时只看到 metadata，需要时再按名加载正文。
@@ -222,6 +229,7 @@ uv run python -m pytest tests/ -v
 
 **强烈推荐优先阅读**
 - `CHANGES.md`
+- `docs/subagents.md`（当任务涉及 `task` / subagent / child session / multi-agent 扩展时）
 
 **可选参考**
 - `docs/agent-core-roadmap.md`：对标 OpenCode 的能力缺口与 v0.2+ 规划

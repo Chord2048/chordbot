@@ -29,7 +29,9 @@ class MemoryManager:
         self._db = MemoryIndexStore(db_path)
         self._embedding_provider = embedding_provider
         self._lock = asyncio.Lock()
+        self._schedule_lock = asyncio.Lock()
         self._last_sync_ms = 0
+        self._sync_task: asyncio.Task[None] | None = None
 
     @property
     def db_path(self) -> str:
@@ -52,7 +54,44 @@ class MemoryManager:
             return
         await self.sync()
 
+    async def schedule_sync_if_stale(self) -> bool:
+        return await self.schedule_sync(force=False)
+
+    async def schedule_sync(self, *, force: bool = False) -> bool:
+        async with self._schedule_lock:
+            current = self._sync_task
+            if current is not None and not current.done():
+                return False
+            if not force and not await self._is_index_stale():
+                return False
+            self._sync_task = asyncio.create_task(self._run_scheduled_sync())
+            return True
+
+    async def wait_for_sync(self) -> None:
+        task = self._sync_task
+        current = asyncio.current_task()
+        if task is None or task.done() or task is current:
+            return
+        await task
+
+    async def close(self) -> None:
+        task = self._sync_task
+        current = asyncio.current_task()
+        if task is None or task.done() or task is current:
+            self._sync_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     async def sync(self) -> None:
+        task = self._sync_task
+        current = asyncio.current_task()
+        if task is not None and not task.done() and task is not current:
+            await task
+            return
         async with self._lock:
             files = await self._scan_files()
             indexed = await self._db.list_files()
@@ -119,7 +158,7 @@ class MemoryManager:
         max_results: int = 5,
         min_score: float = 0.15,
     ) -> dict[str, object]:
-        await self.sync_if_stale()
+        await self.schedule_sync_if_stale()
         query_text = query.strip()
         if not query_text:
             return {"hits": [], "stats": self._stats(search_mode="empty")}
@@ -319,6 +358,24 @@ class MemoryManager:
                 size=stat.st_size,
             )
         return out
+
+    async def _run_scheduled_sync(self) -> None:
+        try:
+            await self.sync()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning(
+                "Scheduled memory sync failed",
+                event="memory.sync.scheduled_error",
+                worktree=self.worktree,
+                error=str(exc),
+            )
+        finally:
+            async with self._schedule_lock:
+                current = asyncio.current_task()
+                if self._sync_task is current:
+                    self._sync_task = None
 
     async def _is_index_stale(self) -> bool:
         now = int(time.time() * 1000)
